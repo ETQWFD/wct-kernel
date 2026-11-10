@@ -1,3 +1,6 @@
+#ifndef WCT_EFI_H
+#define WCT_EFI_H
+
 #ifndef WCT_NATIVE_EFI_H
 #define WCT_NATIVE_EFI_H
 
@@ -272,3 +275,15 @@ typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 #endif
+/* 分配类型与内存类型常量（UEFI 规范值） */
+#define AllocateAnyPages   0
+#define AllocateMaxAddress 1
+#define AllocateAddress    2
+#define EfiReservedMemoryType 0
+#define EfiLoaderCode      1
+#define EfiLoaderData      2
+#define EfiBootServicesCode 3
+#define EfiBootServicesData 4
+#define EfiConventionalMemory 7
+
+#endif /* WCT_EFI_H */

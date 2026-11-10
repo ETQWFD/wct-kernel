@@ -69,7 +69,7 @@ int ps2_mouse_init(void)
     /* 关闭两个端口、清输出缓冲 */
     ps2_cmd(0xAD);
     ps2_cmd(0xA7);
-    while (p_inb(0x64) & 0x01) (void)p_inb(0x60);
+    for (int i = 0; i < 64 && (p_inb(0x64) & 0x01); ++i) (void)p_inb(0x60);  /* 有界清空，避免空口死循环 */
 
     /* 读配置字节，开启 AUX 中断位与时钟 */
     ps2_cmd(0x20);

@@ -149,6 +149,8 @@ void process_command(CHAR16 *line)
 }
 
 #include "ata.c"
+#include "pci.c"
+#include "wctmod.c"
 #include "ps2.c"
 
 #include "gui.inc"
@@ -183,8 +185,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     k_puts("  [ok] USB HID input probe\r\n");
     k_puts("  [disk] probing ATA/AHCI drives...\r\n");
     disk_probe();
+    k_puts("  [step] pci begin\r\n");
+    pci_probe();
+    k_puts("  [step] pci done\r\n");
+#ifndef WCT_SKIP_PS2
     k_puts(ps2_mouse_init() ? "  [ok] PS/2 mouse driver (i8042) ready\r\n"
                             : "  [--] PS/2 mouse not present (USB pointer in use)\r\n");
+#else
+    k_puts("  [--] PS/2 aux init skipped on this firmware (USB pointer in use)\r\n");
+#endif
+    k_puts("  [step] ps2 done, module begin\r\n");
+    if (root_fs) {
+        wct_run_file(root_fs, L"\\wct\\hello.wct");
+    }
+    k_puts("  [step] module done\r\n");
     k_puts("  entering WCT desktop...\r\n");
     BS->Stall(500000);
     cmd_gui();

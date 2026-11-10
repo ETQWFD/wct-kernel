@@ -49,3 +49,26 @@ cd compression && gcc -O2 -o wctetool wcte.c wctetool.c && ./wctetool b <file>
 ## 关于驱动来源（Intel 官方代码）
 
 Intel 公开的网卡驱动源码（e1000 / ixgbe / igb，`linux/` 与 `freebsd/` 目录，BSD-2-Clause 许可）可以在 Intel 官网下载页找到。但**把它并入本内核不是"拷文件"**：这些驱动依赖 Linux 的 PCI 子系统、DMA/中断框架、sk_buff、netdev 与工作队列，需要先在内核里搭出对应框架才能编译。因此本项目当前**未纳入任何 Intel 驱动代码**，也没有声称支持网卡/声卡。要做，正确顺序是：PCI 枚举 → MMIO/IO BAR 映射 → 中断(MSI/IOAPIC) → DMA 描述符环 → 再移植驱动。这属于后续阶段的工作量，不在本轮交付范围内。
+
+
+## QEMU 实跑结果（2026-11-10）
+
+内核在 OVMF + QEMU（`-m 256 -accel tcg`）下完整启动并进入桌面，串口实测输出：
+
+```
+[ok] ATA disk1: QEMU HARDDISK sectors=131072 (64 MB)   table: none (FAT 卷按裸盘处理)
+[ok] ATA disk2: QEMU HARDDISK sectors=524288 (256 MB)  table: MBR partitions=2
+     p1 type=0x83 start=2048 sectors=409600
+[ok] PCI devices=6  storage=1  net=1  audio=0
+     00:01.1 8086:7010 IDE / 00:03.0 8086:100E ethernet
+[wct] loading module at 0x00400000 (fixed base) entry=+0
+[module] hello from a .wct module
+[module] kernel says: WCT-Kernel  api=1
+[module] computed sum 1..1000000 = 500000500000
+entering WCT desktop
+```
+
+已知未闭环：
+- 从盘（IDE 从设备）的 PIO 数据读取路径在客户机内取到的扇区内容与宿主直读不一致，分区解析会退化成裸盘；
+- PS/2 AUX 初始化在本机 OVMF 上会把机器挂死，默认以 `-DWCT_SKIP_PS2` 跳过（USB HID 指针可用）；
+- 网卡/声卡驱动未实现；32 位仅编译验证（无 32 位 OVMF 固件）。
