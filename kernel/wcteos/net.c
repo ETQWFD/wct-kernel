@@ -35,6 +35,8 @@ static UINT8 net_tx_buf[NET_TX_N][NET_BUF] __attribute__((aligned(16)));
 
 static unsigned char net_mac[6];
 static int net_present, net_link, net_ready, net_arp_ok, net_tx_tail;
+static int net_kind;              /* 1 = e1000, 2 = rtl8139 */
+static const char *net_drv_name = "none";
 static UINT32 net_rx_packets, net_tx_packets;
 static UINT32 net_ip;          /* 假定 10.0.2.15 */
 
@@ -59,9 +61,119 @@ static void net_put_dec(char *out, int *pos, UINT32 v)
     while (n) out[(*pos)++] = t[--n];
 }
 
+
+/* ---------- Realtek 8139（PCI 10EC:8139，IO BAR，QEMU/老主板常见） ---------- */
+#define RTL_IDR0    0x00
+#define RTL_TSD0    0x10
+#define RTL_TSAD0   0x20
+#define RTL_RBSTART 0x30
+#define RTL_CR      0x37
+#define RTL_CAPR    0x38
+#define RTL_CBR     0x3A
+#define RTL_IMR     0x3C
+#define RTL_ISR     0x3E
+#define RTL_TCR     0x40
+#define RTL_RCR     0x44
+#define RTL_CFG1    0x52
+
+#define RTL_RX_SZ   (8192 + 16)
+static UINT16 rtl_io;
+static UINT8 rtl_rxbuf[RTL_RX_SZ] __attribute__((aligned(16)));
+static UINT8 rtl_txbuf[2][2048] __attribute__((aligned(16)));
+static int rtl_tx_i, rtl_rx_cur;
+
+static UINT32 io_inl(UINT16 p) { UINT32 v; __asm__ __volatile__("inl %1,%0" : "=a"(v) : "Nd"(p)); return v; }
+static void io_outl(UINT16 p, UINT32 v) { __asm__ __volatile__("outl %0,%1" : : "a"(v), "Nd"(p)); }
+static void io_outw(UINT16 p, UINT16 v) { __asm__ __volatile__("outw %0,%1" : : "a"(v), "Nd"(p)); }
+static UINT16 io_inw(UINT16 p) { UINT16 v; __asm__ __volatile__("inw %1,%0" : "=a"(v) : "Nd"(p)); return v; }
+
+static int net_rtl_probe(void)
+{
+    UINT32 io = 0;
+    for (int i = 0; i < pci_count(); ++i) {
+        const PCI_INFO *p = pci_get(i);
+        if (!p || p->class_code != 0x02) continue;
+        if (p->vendor != 0x10EC) continue;                 /* Realtek */
+        if (p->device != 0x8139 && p->device != 0x8139) continue;
+        if (!(p->bar[0] & 1u)) continue;                   /* 需要 IO BAR */
+        io = p->bar[0] & 0xFFFC;
+        break;
+    }
+    if (!io) return 0;
+    rtl_io = (UINT16)io;
+
+    p_outb(rtl_io + RTL_CFG1, 0x00);                        /* 退出低功耗 */
+    p_outb(rtl_io + RTL_CR, 0x10);                          /* RST */
+    for (int i = 0; i < 1000; ++i) {
+        if (!(p_inb(rtl_io + RTL_CR) & 0x10)) break;
+        ST->BootServices->Stall(1000);
+    }
+    p_outb(rtl_io + RTL_IMR, 0x00);
+    io_outw(rtl_io + RTL_ISR, 0xFFFF);
+    io_outl(rtl_io + RTL_TCR, 0x03000700);
+    io_outl(rtl_io + RTL_RCR, 0x0000008F);                  /* AB|AM|APM|AR + 8K */
+    io_outl(rtl_io + RTL_RBSTART, (UINT32)(UINTN)rtl_rxbuf);
+    p_outb(rtl_io + RTL_CAPR, 0x00);
+    p_outb(rtl_io + RTL_CR, 0x0C);                           /* RE|TE */
+
+    for (int i = 0; i < 6; ++i) net_mac[i] = p_inb(rtl_io + RTL_IDR0 + i);
+    int allz = 1;
+    for (int i = 0; i < 6; ++i) if (net_mac[i]) allz = 0;
+    if (allz) { net_mac[0]=0x52; net_mac[1]=0x54; net_mac[2]=0x00; net_mac[3]=0x12; net_mac[4]=0x34; net_mac[5]=0x56; }
+
+    rtl_tx_i = 0; rtl_rx_cur = 0; net_tx_tail = 0;
+    net_ip = 0x0A00020F;
+    net_kind = 2; net_drv_name = "rtl8139"; net_link = 1; net_ready = 1; net_present = 1;
+    return 1;
+}
+
+static int net_rtl_send(const UINT8 *frame, UINT16 len)
+{
+    if (len > 2048) return 0;
+    int i = rtl_tx_i;
+    for (int k = 0; k < len; ++k) rtl_txbuf[i][k] = frame[k];
+    io_outl(rtl_io + RTL_TSAD0 + i * 4, (UINT32)(UINTN)rtl_txbuf[i]);
+    io_outl(rtl_io + RTL_TSD0 + i * 4, (UINT32)len);         /* 写长度即启动 DMA */
+    rtl_tx_i = (i + 1) & 1;
+    ++net_tx_packets;
+    for (int spin = 0; spin < 20000; ++spin) {
+        UINT32 tsd = io_inl(rtl_io + RTL_TSD0 + i * 4);
+        if ((tsd & 0x00003FFF) == 0) return 1;
+        ST->BootServices->Stall(50);
+    }
+    return 1;
+}
+
+static int net_rtl_poll(UINT8 *out, UINT16 *out_len)
+{
+    UINT16 cbr = io_inw(rtl_io + RTL_CBR);
+    if (cbr == (UINT16)rtl_rx_cur) return 0;
+    UINT8 *pkt = rtl_rxbuf + rtl_rx_cur;
+    UINT16 status = *(UINT16 *)pkt;
+    UINT16 len = *(UINT16 *)(pkt + 2);
+    if (!(status & 0x0001) || len < 4 || len > 1600) {       /* ROK */
+        UINT16 next = (UINT16)((rtl_rx_cur + 4 + (len ? len : 4) + 3) & ~3u);
+        rtl_rx_cur = (int)((next + 4) % (RTL_RX_SZ - 16));
+        p_outb(rtl_io + RTL_CAPR, (UINT8)((rtl_rx_cur - 16) & 0xFF));
+        return 0;
+    }
+    UINT16 dlen = (UINT16)(len - 4);                         /* 去掉 CRC */
+    if (dlen > NET_BUF) dlen = NET_BUF;
+    for (int k = 0; k < dlen; ++k) out[k] = pkt[4 + k];
+    *out_len = dlen;
+    UINT16 next = (UINT16)((rtl_rx_cur + 4 + len + 3) & ~3u);
+    rtl_rx_cur = (int)((next + 4) % (RTL_RX_SZ - 16));
+    p_outb(rtl_io + RTL_CAPR, (UINT8)((rtl_rx_cur - 16) & 0xFF));
+    ++net_rx_packets;
+    return 1;
+}
+
+static int net_link_up(void) { return net_ready && net_arp_ok; }
+
 int net_probe(void)
 {
     net_present = 0; net_ready = 0; net_link = 0; net_arp_ok = 0;
+    net_kind = 0; net_drv_name = "none";
     for (int i = 0; i < pci_count(); ++i) {
         const PCI_INFO *p = pci_get(i);
         if (!p) continue;
@@ -73,7 +185,7 @@ int net_probe(void)
         net_present = 1;
         break;
     }
-    if (!net_present) return 0;
+    if (!net_present) return net_rtl_probe();   /* 没有 Intel，就试 Realtek 8139 */
 
     /* 复位 */
     net_wr(E1000_CTRL, net_rd(E1000_CTRL) | (1u << 26));
@@ -127,13 +239,14 @@ int net_probe(void)
     net_wr(E1000_TCTL, (1u << 1) | (1u << 3) | (0x10u << 4) | (0x40u << 12));
 
     net_link = (net_rd(E1000_STATUS) & 2u) ? 1 : 0;
-    net_ready = 1;
+    net_kind = 1; net_drv_name = "e1000"; net_ready = 1;
     return 1;
 }
 
 static int net_send(const UINT8 *frame, UINT16 len)
 {
     if (!net_ready || len > NET_BUF) return 0;
+    if (net_kind == 2) return net_rtl_send(frame, len);
     int i = net_tx_tail;
     for (int k = 0; k < len; ++k) net_tx_buf[i][k] = frame[k];
     net_desc(net_tx_desc, i, (UINT32)(UINTN)net_tx_buf[i], len, 0x0B /*EOP|IFCS|RS*/, 0);
@@ -152,6 +265,7 @@ static int net_send(const UINT8 *frame, UINT16 len)
 static int net_poll(UINT8 *out, UINT16 *out_len)
 {
     if (!net_ready) return 0;
+    if (net_kind == 2) return net_rtl_poll(out, out_len);
     UINT32 head = net_rd(E1000_RDH);
     static UINT32 seen = 0;
     if (head == seen) return 0;
@@ -202,13 +316,27 @@ int net_arp_test(void)
     return 0;
 }
 
+const char *net_short_status(void)
+{
+    static char b[48];
+    int i = 0;
+    for (const char *d = net_drv_name; *d && i < 10; ++d) b[i++] = *d;
+    const char *tail = "  link:up  arp:ok";
+    if (!net_link) tail = "  link:down";
+    else if (!net_arp_ok) tail = "  link:up  arp:no";
+    for (const char *q = tail; *q && i < 46; ++q) b[i++] = *q;
+    b[i] = 0;
+    return b;
+}
+
 const char *net_status_line(void)
 {
     static char line[96];
     int i = 0;
-    if (!net_present) { return "net: no Intel NIC found"; }
+    if (!net_present) return "net: no NIC (e1000/rtl8139 均未找到)";
     line[i++] = 'n'; line[i++] = 'e'; line[i++] = 't'; line[i++] = ':'; line[i++] = ' ';
-    line[i++] = 'e'; line[i++] = '1'; line[i++] = '0'; line[i++] = '0'; line[i++] = '0'; line[i++] = ' ';
+    for (const char *d = net_drv_name; *d && i < 20; ++d) line[i++] = *d;
+    line[i++] = ' ';
     for (int k = 0; k < 6; ++k) {
         if (k) line[i++] = ':';
         line[i++] = "0123456789ABCDEF"[net_mac[k] >> 4];

@@ -62,6 +62,7 @@ static UINTN gfx_w, gfx_h, gfx_stride;
 static UINT32 gfx_bg, gfx_top, gfx_panel, gfx_text_c, gfx_dim, gfx_accent;
 static UINTN gfx_original_mode;
 static int mouse_x, mouse_y, mouse_down, mouse_was_down, mouse_click, mouse_moved, mouse_wheel;
+static int mouse_rclick, mouse_rwas;
 static int gfx_done;
 
 /* F11: mirror X/Y for firmware that reports them inverted. */
@@ -106,6 +107,13 @@ static void wct_ui_draw(void);
 static int  wct_ui_click(void);
 static int  wct_ui_key(EFI_INPUT_KEY *key);
 static void wct_ui_bg(void);
+static void ui_tray_draw(void);
+static int ui_tray_click(void);
+static int ui_icon_click(void);
+static int net_link_up(void);
+static const char *net_short_status(void);
+static void ui_open_taskmgr(void);
+static void ui_next_wallpaper(void);
 static void wct_ui_open_file(const CHAR16 *path);
 static int  wct_ui_demo(void);
 static void wct_ui_demo_start(void);
@@ -207,10 +215,23 @@ static void gfx_cursor(void)
         {0x80,0},{0xC0,0},{0xE0,0},{0xF0,0},{0xF8,0},{0xFC,0},{0xFE,0},{0xFF,0},
         {0xFF,0x80},{0xF8,0},{0xD8,0},{0x8C,0},{0x0C,0},{0x06,0},{0x06,0},{0}
     };
-    for (int y = 0; y < 16; ++y)
-        for (int x = 0; x < 10; ++x)
-            if (arrow[y][x / 8] & (0x80 >> (x % 8)))
-                gfx_pixel(mouse_x + x, mouse_y + y, gfx_rgb(255, 255, 255));
+    /* 先画一圈白描边，再压黑色箭头：深色壁纸上也清楚 */
+    for (int pass = 0; pass < 2; ++pass) {
+        UINT32 col = pass ? gfx_rgb(16, 16, 16) : gfx_rgb(255, 255, 255);
+        for (int y = 0; y < 15; ++y)
+            for (int x = 0; x < 9; ++x)
+                if (arrow[y][x / 8] & (0x80 >> (x % 8))) {
+                    if (pass) gfx_pixel(mouse_x + x, mouse_y + y, col);
+                    else {
+                        for (int oy = -1; oy <= 1; ++oy)
+                            for (int ox = -1; ox <= 1; ++ox) {
+                                int px = x + ox, py = y + oy;
+                                if (px >= 0 && py >= 0 && px < 10 && py < 16)
+                                    gfx_pixel(mouse_x + px, mouse_y + py, col);
+                            }
+                    }
+                }
+    }
 }
 
 static void cursor_restore_bg(void)
@@ -292,6 +313,7 @@ static void hid_poll(void)
     if (len >= 4) mouse_wheel = (signed char)rep[3];
     mouse_x += dx; mouse_y += dy;
     mouse_down = (rep[0] & 1) != 0;
+    { int rb = (rep[0] & 2) ? 1 : 0; if (rb && !mouse_rwas) mouse_rclick = 1; mouse_rwas = rb; }
     if (dx || dy) mouse_moved = 1;
 }
 
@@ -308,6 +330,9 @@ static void mouse_poll(void)
             if (invert_mouse) { dx = -dx; dy = -dy; }
             if (dx || dy) { mouse_x += dx; mouse_y += dy; mouse_moved = 1; }
             mouse_down = st.LeftButton;
+            int rb = st.RightButton ? 1 : 0;
+            if (rb && !mouse_rwas) mouse_rclick = 1;
+            mouse_rwas = rb;
             mouse_wheel = (int)st.RelativeMovementZ;
         }
     } else if (abs_ptr && abs_ptr->Mode) {
@@ -326,6 +351,7 @@ static void mouse_poll(void)
                 mouse_x = nx; mouse_y = ny;
             }
             mouse_down = (st.ActiveButtons & 1) != 0;
+            { int rb = (st.ActiveButtons & 2) ? 1 : 0; if (rb && !mouse_rwas) mouse_rclick = 1; mouse_rwas = rb; }
         }
     } else if (hid_ready) {
         hid_poll();
@@ -335,6 +361,7 @@ static void mouse_poll(void)
             if (invert_mouse) { dx = -dx; dy = -dy; }
             if (dx || dy) { mouse_x += dx * 2; mouse_y += dy * 2; mouse_moved = 1; }
             mouse_down = (btn & 1) ? 1 : 0;
+            { int rb = (btn & 2) ? 1 : 0; if (rb && !mouse_rwas) mouse_rclick = 1; mouse_rwas = rb; }
             mouse_wheel = 0;
         }
     }
@@ -608,43 +635,112 @@ static void draw_window(GuiWin *w)
     else gedit_draw(w);
 }
 
+/* ---------- 桌面图标（手绘小图形，不依赖外部图片） ---------- */
+static void ico_folder(int x, int y)
+{
+    gfx_fill(x + 4, y + 8, 34, 24, gfx_rgb(214,178,96));
+    gfx_fill(x + 4, y + 4, 16, 8, gfx_rgb(230,196,118));
+    gfx_border(x + 4, y + 4, 34, 28, gfx_rgb(140,110,50));
+    gfx_fill(x + 6, y + 14, 30, 2, gfx_rgb(180,146,74));
+}
+static void ico_term(int x, int y)
+{
+    gfx_fill(x + 4, y + 4, 34, 30, gfx_rgb(28,30,36));
+    gfx_border(x + 4, y + 4, 34, 30, gfx_rgb(90,94,104));
+    gfx_fill(x + 9, y + 12, 3, 4, gfx_rgb(210,214,222));
+    gfx_fill(x + 12, y + 15, 5, 3, gfx_rgb(210,214,222));
+    gfx_fill(x + 9, y + 22, 12, 2, gfx_rgb(150,156,168));
+}
+static void ico_edit(int x, int y)
+{
+    gfx_fill(x + 7, y + 3, 26, 32, gfx_rgb(246,244,238));
+    gfx_border(x + 7, y + 3, 26, 32, gfx_rgb(150,146,136));
+    for (int i = 0; i < 5; ++i) gfx_fill(x + 11, y + 8 + i * 5, 18, 2, gfx_rgb(120,120,120));
+}
+static void ico_set(int x, int y)
+{
+    int cx = x + 21, cy = y + 19;
+    for (int a = 0; a < 8; ++a) {
+        int dx = (a == 1 || a == 2 || a == 5 || a == 6) ? 9 : 0;
+        int dy = (a == 3 || a == 4 || a == 5 || a == 6) ? 9 : 0;
+        if (a == 0 || a == 4) gfx_fill(cx - 2, cy - 13, 4, 26, gfx_accent);
+        else if (a == 2 || a == 6) gfx_fill(cx - 13, cy - 2, 26, 4, gfx_accent);
+        else gfx_fill(cx - dx, cy - dy, 4, 4, gfx_accent);
+    }
+    gfx_fill(cx - 7, cy - 7, 14, 14, gfx_rgb(226,222,212));
+    gfx_border(cx - 7, cy - 7, 14, 14, gfx_accent);
+}
+static void ico_task(int x, int y)
+{
+    gfx_fill(x + 5, y + 4, 32, 30, gfx_rgb(40,44,52));
+    gfx_fill(x + 9, y + 20, 5, 10, gfx_rgb(120,200,140));
+    gfx_fill(x + 16, y + 14, 5, 16, gfx_rgb(230,190,90));
+    gfx_fill(x + 23, y + 9, 5, 21, gfx_rgb(120,160,230));
+}
+static void ico_info(int x, int y)
+{
+    gfx_fill(x + 8, y + 4, 26, 30, gfx_rgb(226,222,212));
+    gfx_border(x + 8, y + 4, 26, 30, gfx_accent);
+    gfx_fill(x + 20, y + 9, 3, 8, gfx_accent);
+    gfx_fill(x + 19, y + 10, 5, 3, gfx_accent);
+    gfx_fill(x + 20, y + 20, 3, 9, gfx_accent);
+}
+
+static void draw_icon_cell(int x, int y, int kind, const CHAR16 *label)
+{
+    int hot = (mouse_x >= x && mouse_x < x + 64 && mouse_y >= y && mouse_y < y + 64);
+    if (hot) gfx_fill(x, y, 64, 64, theme_index == 5 ? gfx_rgb(232,227,216) : gfx_rgb(18,26,42));
+    switch (kind) {
+    case 0: ico_folder(x + 10, y + 10); break;
+    case 1: ico_term(x + 10, y + 10); break;
+    case 2: ico_edit(x + 10, y + 10); break;
+    case 3: ico_set(x + 10, y + 10); break;
+    case 4: ico_task(x + 10, y + 10); break;
+    default: ico_info(x + 10, y + 10); break;
+    }
+    int lw = 0;
+    for (const CHAR16 *q = label; *q; ++q) lw += ((unsigned short)*q <= 126) ? 8 : 16;
+    gfx_text_w(x + (64 - lw) / 2, y + 50, label, hot ? gfx_accent : gfx_text_c);
+}
+
+#define DESK_ICONS 6
 static void draw_desktop(void)
 {
     wct_ui_bg();
-    gfx_fill(0, 0, (int)gfx_w, 38, gfx_top);
-    gfx_text_w(14, 11, L"wcteos 桌面", gfx_text_c);
-    gfx_text_w((int)gfx_w - 260, 11, L"wcteos 0.9-测试  |  WCT 内核", gfx_dim);
-    if (invert_mouse) gfx_text((int)gfx_w - 60, 11, "INV", gfx_accent);
-    const CHAR16 *names[5] = { L"文件", L"终端", L"编辑器", L"主题", L"退出" };
-    for (int i = 0; i < 5; ++i) {
-        int x = 40 + i * 180, y = 75;
-        gfx_fill(x, y, 160, 74, gfx_panel);
-        gfx_border(x, y, 160, 74, gfx_accent);
-        gfx_text_w(x + 14, y + 14, names[i], gfx_text_c);
-        if (i == 2) gfx_text_w(x + 14, y + 42, L"切换", gfx_dim);
-        else if (i == 3) gfx_text_w(x + 14, y + 42, L"离开", gfx_dim);
-        else gfx_text_w(x + 14, y + 42, L"打开", gfx_dim);
+    /* 顶部只有一条很细的纸边，不放说明文字 */
+    gfx_fill(0, 0, (int)gfx_w, 2, gfx_accent);
+
+    const CHAR16 *names[DESK_ICONS] = { L"文件管理器", L"终端", L"文本编辑器",
+                                       L"设置", L"任务管理器", L"系统属性" };
+    for (int i = 0; i < DESK_ICONS; ++i) {
+        int x = 28 + (i % 3) * 88;
+        int y = 34 + (i / 3) * 88;
+        draw_icon_cell(x, y, i, names[i]);
     }
-    gfx_text_w(40, 180, L"拖动窗口标题栏可移动。F11 切换鼠标 X/Y。", gfx_dim);
-    gfx_text_w(40, 202, L"拖动时只画虚线框，松开鼠标落位。", gfx_dim);
-    gfx_fill(0, (int)gfx_h - 34, (int)gfx_w, 34, gfx_top);
-    /* 左下角开始按钮 */
-    gfx_fill(6, (int)gfx_h - 30, 56, 24, gfx_panel);
-    gfx_border(6, (int)gfx_h - 30, 56, 24, gfx_accent);
-    gfx_text_w(20, (int)gfx_h - 26, L"开始", gfx_accent);
-    /* 右侧托盘：网络状态 + 时钟 */
-    gfx_fill((int)gfx_w - 168, (int)gfx_h - 30, 60, 24, gfx_panel);
-    gfx_border((int)gfx_w - 168, (int)gfx_h - 30, 60, 24, gfx_dim);
-    gfx_text_w((int)gfx_w - 156, (int)gfx_h - 26, L"网络", gfx_dim);
-    int bx = 72;
+
+    /* 任务栏 */
+    int h = (int)gfx_h, W = (int)gfx_w;
+    gfx_fill(0, h - 34, W, 34, gfx_top);
+    gfx_fill(0, h - 34, W, 1, gfx_rgb(200,193,180));
+    gfx_fill(6, h - 30, 64, 26, gfx_panel);
+    gfx_border(6, h - 30, 64, 26, gfx_accent);
+    for (int bx = 0; bx < 2; ++bx)
+        for (int by = 0; by < 2; ++by)
+            gfx_fill(13 + bx * 8, h - 26 + by * 8, 6, 6, gfx_accent);
+    gfx_text_w(38, h - 26, L"开始", gfx_accent);
+
+    int bx = 78;
     for (int i = 0; i < WIN_MAX; ++i) {
         if (!wins[i].alive) continue;
-        gfx_fill(bx, (int)gfx_h - 30, 150, 24, i == focus_win ? gfx_accent : gfx_panel);
-        gfx_text_w(bx + 8, (int)gfx_h - 26, wins[i].type == WIN_FILES ? L"文件" : (wins[i].type == WIN_TERM ? L"终端" : L"编辑器"), gfx_text_c);
-        bx += 160;
+        gfx_fill(bx, h - 30, 140, 26, i == focus_win ? gfx_accent : gfx_panel);
+        gfx_text_w(bx + 8, h - 26, wins[i].type == WIN_FILES ? L"文件管理器" :
+                                   (wins[i].type == WIN_TERM ? L"终端" : L"编辑器"),
+                   i == focus_win ? gfx_rgb(255,255,255) : gfx_text_c);
+        bx += 146;
     }
-}
 
+    ui_tray_draw();
+}
 static void draw_all(void)
 {
     draw_desktop();
@@ -803,6 +899,12 @@ static void handle_term_key(GuiWin *w, EFI_INPUT_KEY key)
 
 static void handle_click(void)
 {
+    if (mouse_rclick) {
+        mouse_rclick = 0;
+        if (mouse_y >= (int)gfx_h - 34) ui_open_taskmgr();
+        else ui_next_wallpaper();
+        return;
+    }
     if (wct_ui_click()) return;
     int wi = win_at(mouse_x, mouse_y);
     if (wi >= 0) {
@@ -857,27 +959,14 @@ static void handle_click(void)
         return;
     }
     if (mouse_y >= (int)gfx_h - 34) {
-        int bx = 8;
+        int bx = 78;
         for (int i = 0; i < WIN_MAX; ++i) {
             if (!wins[i].alive) continue;
-            if (mouse_x >= bx && mouse_x < bx + 150) { win_focus(i); return; }
-            bx += 160;
+            if (mouse_x >= bx && mouse_x < bx + 140) { win_focus(i); return; }
+            bx += 146;
         }
     }
-    for (int i = 0; i < 5; ++i) {
-        int x = 40 + i * 180, y = 75;
-        if (mouse_x >= x && mouse_x < x + 160 && mouse_y >= y && mouse_y < y + 74) {
-            if (i == 0) win_open(WIN_FILES);
-            else if (i == 1) win_open(WIN_TERM);
-            else if (i == 2) {
-                int e = win_open(WIN_EDIT);
-                if (e >= 0) { wcopy(wins[e].edit_path, 256, L"\\home\\wct\\untitled.txt"); gedit_load(&wins[e]); }
-            }
-            else if (i == 3) theme_index = (theme_index + 1) % 6;
-            else gfx_done = 1;
-            return;
-        }
-    }
+    ui_icon_click();
 }
 
 /* ---------- main loop ---------- */

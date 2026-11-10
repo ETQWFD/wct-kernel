@@ -6,7 +6,11 @@
    ===================================================================== */
 
 static int ui_menu, ui_run, ui_admin, ui_set, ui_task, ui_about, ui_lock;
-static int ui_wp = 0;
+static int ui_net, ui_vol;          /* 托盘面板 */
+static int ui_vol_lvl = 62, ui_vol_mute;
+static int ui_task_sel = -1;
+static int ui_ctx;                  /* 任务栏右键菜单 */
+static int ui_wp = 0;   /* 0 纯色 1 渐变 2 网格 3 动态 .glf 4 纸纹 5 星夜 */
 static int ui_demo_stage = -1;   /* >=0 表示处于演示序列 */              /* 0 纯色 1 渐变 2 网格 3 动态 .glf */
 static char ui_input[96];
 static int ui_len;
@@ -127,6 +131,29 @@ static void wct_ui_bg(void)
         }
         return;
     }
+    if (ui_wp == 4) {                    /* 纸纹：横向细纹理，像旧纸 */
+        gfx_fill(0, 0, W, H, theme_index == 5 ? gfx_rgb(226,222,212) : gfx_bg);
+        UINT32 a = theme_index == 5 ? gfx_rgb(214,209,198) : gfx_rgb(14, 22, 38);
+        for (int y = 0; y < H; y += 3) gfx_fill(0, y, W, 1, a);
+        for (int x = 0; x < W; x += 220) gfx_fill(x, 0, 1, H, gfx_rgb(200,193,180));
+        return;
+    }
+    if (ui_wp == 5) {                    /* 星夜：深色渐变 + 固定种子星点 */
+        for (int i = 0; i < H; ++i) {
+            int t = i * 255 / (H > 1 ? H - 1 : 1);
+            gfx_fill(0, i, W, 1, gfx_rgb((4 * (255 - t) + 20 * t) / 255,
+                                          (8 * (255 - t) + 30 * t) / 255,
+                                          (22 * (255 - t) + 60 * t) / 255));
+        }
+        UINT32 seed = 12345;
+        for (int n = 0; n < 260; ++n) {
+            seed = seed * 1103515245u + 12345u;
+            int px = (int)((seed >> 8) % (UINT32)W);
+            int py = (int)((seed >> 16) % (UINT32)(H - 40));
+            gfx_fill(px, py, 2, 2, (n % 5) ? gfx_rgb(210,214,222) : gfx_rgb(255,246,200));
+        }
+        return;
+    }
     /* 网格 */
     gfx_fill(0, 0, W, H, gfx_bg);
     for (int y = 0; y < H; y += 24)
@@ -185,7 +212,7 @@ static void ui_execute(void)
 
     if (scmp(t, "wtr") == 0) { ui_run = 0; ui_len = 0; ui_input[0] = 0; win_open(WIN_TERM); return; }
     if (scmp(t, "wtcer") == 0) { ui_run = 0; ui_about = 1; return; }
-    if (scmp(t, "taskmgr") == 0) { ui_run = 0; ui_task = 1; return; }
+    if (scmp(t, "taskmgr") == 0 || scmp(t, "tisal") == 0) { ui_run = 0; ui_task = 1; return; }
     if (scmp(t, "cfg") == 0) { ui_run = 0; ui_set = 1; return; }
 
     if (ui_ends(t, ".wct")) {
@@ -251,11 +278,11 @@ static void ui_draw_set(void)
         ui_btn_w(x + 16 + i * 88, y + 60, 80, 26, names[i], theme_index == idx[i]);
 
     gfx_text_w(x + 16, y + 104, L"壁纸", gfx_dim);
-    const CHAR16 *wp[4] = { L"纯色", L"渐变", L"网格", L"动态壁纸(.glf)" };
-    for (int i = 0; i < 4; ++i)
-        ui_btn_w(x + 16 + i * 134, y + 124, 126, 26, wp[i], ui_wp == i);
+    const CHAR16 *wp[6] = { L"纯色", L"渐变", L"网格", L"动态(.glf)", L"纸纹", L"星夜" };
+    for (int i = 0; i < 6; ++i)
+        ui_btn_w(x + 16 + i * 94, y + 124, 88, 26, wp[i], ui_wp == i);
 
-    gfx_text_w(x + 16, y + 168, L"动态壁纸读取 \\wct\\wall\\default.glf（GLF1 / RGB332 帧）",
+    gfx_text_w(x + 16, y + 164, L"动态壁纸读取 \\wct\\wall\\default.glf（GLF1 / RGB332 帧）",
              glf_ok ? gfx_accent : gfx_dim);
     gfx_text_w(x + 16, y + 188, glf_ok ? L"glf 已加载，可以切换" : L"未找到 glf，自动退回渐变", gfx_dim);
 
@@ -296,7 +323,7 @@ static void ui_draw_task(void)
         cap[k++] = (CHAR16)(L'0' + (n / 10) % 10);
         cap[k++] = (CHAR16)(L'0' + n % 10);
         cap[k] = 0;
-        gfx_text_w(x + 300, y + h - 38, cap, gfx_dim);
+        gfx_text_w(x + w - 190, y + h - 68, cap, gfx_dim);
     }
     int n = proc_total();
     if (n > 7) n = 7;
@@ -304,7 +331,9 @@ static void ui_draw_task(void)
         const WCT_PROC *pp = proc_at(i);
         if (!pp) break;
         int ry = y + 60 + i * 22;
-        gfx_fill(x + 12, ry - 4, w - 24, 20, (i & 1) ? gfx_panel : (theme_index == 5 ? gfx_rgb(238,234,224) : gfx_rgb(12, 18, 32)));
+        gfx_fill(x + 12, ry - 4, w - 24, 20,
+                 i == ui_task_sel ? gfx_accent
+                 : ((i & 1) ? gfx_panel : (theme_index == 5 ? gfx_rgb(238,234,224) : gfx_rgb(12, 18, 32))));
         char nm[28];
         int q = 0;
         if (pp->pid >= 10) nm[q++] = (char)('0' + (pp->pid / 10) % 10);
@@ -329,10 +358,10 @@ static void ui_draw_task(void)
         }
     }
 
-    gfx_text_w(x + 16, y + h - 72, L"新建进程会打开运行框，勾选“管理员”即以管理员身份运行",
+    gfx_text_w(x + 16, y + h - 72, L"选中一行后按“结束进程”。内核进程不允许结束。",
              gfx_dim);
     ui_btn_w(x + 16, y + h - 44, 150, 26, L"新建进程", 0);
-    ui_btn_w(x + 180, y + h - 44, 110, 26, L"刷新", 0);
+    ui_btn_w(x + 180, y + h - 44, 120, 26, L"结束进程", 0);
     ui_btn_w(x + w - 108, y + h - 44, 84, 26, L"关闭", 0);
 }
 
@@ -423,6 +452,166 @@ static void ui_draw_lock(void)
     gfx_text((int)gfx_w / 2 - 90, (int)gfx_h - 60, "0.9-test", gfx_dim);
 }
 
+/* ---------- 托盘：音量 / 网络 / 数字时钟 ---------- */
+static void ui_tray_geom(int *net_x, int *vol_x, int *clk_x, int H)
+{
+    int W = (int)gfx_w;
+    *clk_x = W - 74;
+    *vol_x = W - 108;
+    *net_x = W - 142;
+    (void)H;
+}
+
+static void ui_draw_clock(int x, int H)
+{
+    EFI_TIME t; UINT32 cap = 0;
+    int hh = 0, mm = 0;
+    if (!EFI_IS_ERROR(ST->RuntimeServices->GetTime(&t, (void *)&cap))) { hh = t.Hour; mm = t.Minute; }
+    CHAR16 buf[8];
+    buf[0] = (CHAR16)(L'0' + (hh / 10) % 10);
+    buf[1] = (CHAR16)(L'0' + hh % 10);
+    buf[2] = L':';
+    buf[3] = (CHAR16)(L'0' + (mm / 10) % 10);
+    buf[4] = (CHAR16)(L'0' + mm % 10);
+    buf[5] = 0;
+    gfx_text_w(x, H - 26, buf, gfx_text_c);
+}
+
+static void ui_draw_tray_icons(int nx, int vx, int H)
+{
+    /* 音量：喇叭 + 两道声波；静音时画斜杠 */
+    gfx_fill(vx + 4, H - 24, 5, 10, gfx_text_c);
+    gfx_fill(vx + 9, H - 27, 5, 16, gfx_text_c);
+    gfx_fill(vx + 14, H - 25, 2, 12, gfx_text_c);
+    if (ui_vol_mute) gfx_fill(vx + 2, H - 26, 18, 2, gfx_rgb(190,70,70));
+    else {
+        gfx_fill(vx + 19, H - 22, 2, 6, gfx_dim);
+        gfx_fill(vx + 23, H - 25, 2, 12, gfx_dim);
+    }
+    /* 网络：能连通画插头，连不上画禁止圈 */
+    if (net_link_up()) {
+        gfx_fill(nx + 6, H - 26, 10, 12, gfx_accent);
+        gfx_fill(nx + 8, H - 30, 2, 5, gfx_accent);
+        gfx_fill(nx + 12, H - 30, 2, 5, gfx_accent);
+        gfx_fill(nx + 16, H - 24, 8, 2, gfx_accent);
+    } else {
+        gfx_border(nx + 5, H - 29, 18, 18, gfx_rgb(170,80,80));
+        for (int i = 0; i < 14; ++i) gfx_fill(nx + 7 + i, H - 27 + i, 2, 2, gfx_rgb(170,80,80));
+    }
+}
+
+static void ui_draw_net(void)
+{
+    int H = (int)gfx_h, W = (int)gfx_w;
+    int w = 320, h = 268;
+    int x = W - w - 10, y = H - 34 - h - 4;
+    ui_panel_w(x, y, w, h, L"网络");
+    gfx_text_w(x + 16, y + 40, L"有线以太网", gfx_dim);
+    gfx_text_w(x + 16, y + 60, net_link_up() ? L"已连接（WCT 原生网卡驱动）" : L"未连接 / 未检测到网卡",
+             net_link_up() ? gfx_accent : gfx_rgb(170,80,80));
+    gfx_text(x + 16, y + 78, net_short_status(), gfx_dim);
+
+    gfx_fill(x + 16, y + 100, w - 32, 1, gfx_rgb(200,193,180));
+    gfx_text_w(x + 16, y + 110, L"Wi-Fi 网络", gfx_dim);
+    gfx_text_w(x + 16, y + 132, L"未检测到无线网卡（本机仅内置有线驱动）", gfx_rgb(150,120,80));
+    const CHAR16 *nets[3] = { L"wcteos-guest", L"home-5g", L"office-ap" };
+    for (int i = 0; i < 3; ++i) {
+        int ry = y + 156 + i * 22;
+        gfx_fill(x + 14, ry - 3, w - 28, 20, (i & 1) ? gfx_panel : gfx_top);
+        gfx_text_w(x + 22, ry, nets[i], gfx_dim);
+        gfx_text_w(x + w - 104, ry, L"需要无线网卡", gfx_dim);
+    }
+    ui_btn_w(x + 16, y + h - 40, 84, 26, L"刷新", 0);
+    ui_btn_w(x + w - 104, y + h - 40, 84, 26, L"关闭", 0);
+}
+
+static void ui_draw_vol(void)
+{
+    int H = (int)gfx_h, W = (int)gfx_w;
+    int w = 300, h = 166;
+    int x = W - w - 10, y = H - 34 - h - 4;
+    ui_panel_w(x, y, w, h, L"音量");
+    int bars = 16, seg = ui_vol_lvl / (100 / bars);
+    for (int i = 0; i < bars; ++i) {
+        int bx = x + 20 + i * 15;
+        gfx_fill(bx, y + 60, 12, 20, i < seg ? gfx_accent : gfx_rgb(200,193,180));
+        gfx_border(bx, y + 60, 12, 20, gfx_rgb(170,164,152));
+    }
+    CHAR16 lv[8];
+    if (ui_vol_lvl >= 100) {
+        lv[0] = L'1'; lv[1] = L'0'; lv[2] = L'0'; lv[3] = L'%'; lv[4] = 0;
+    } else {
+        lv[0] = (CHAR16)(L'0' + ui_vol_lvl / 10);
+        lv[1] = (CHAR16)(L'0' + ui_vol_lvl % 10);
+        lv[2] = L'%'; lv[3] = 0;
+    }
+    gfx_text_w(x + 20, y + 90, L"当前音量：", gfx_dim);
+    gfx_text_w(x + 108, y + 90, lv, gfx_text_c);
+    if (ui_vol_mute) gfx_text_w(x + 170, y + 90, L"[已静音]", gfx_rgb(170,80,80));
+    ui_btn_w(x + 20, y + h - 44, 60, 26, L"－", 0);
+    ui_btn_w(x + 90, y + h - 44, 60, 26, L"＋", 0);
+    ui_btn_w(x + 160, y + h - 44, 76, 26, L"静音", ui_vol_mute);
+    ui_btn_w(x + w - 92, y + h - 44, 76, 26, L"关闭", 0);
+}
+
+static void ui_tray_draw(void)
+{
+    int nx, vx, cx, H = (int)gfx_h;
+    ui_tray_geom(&nx, &vx, &cx, H);
+    ui_draw_tray_icons(nx, vx, H);
+    ui_draw_clock(cx, H);
+}
+
+static void ui_open_taskmgr(void) { ui_task = 1; ui_menu = ui_set = ui_about = ui_run = 0; ui_net = ui_vol = 0; }
+static void ui_next_wallpaper(void) { ui_wp = (ui_wp + 1) % 6; if (ui_wp == 3) ui_glf_load(); }
+
+static int ui_icon_click(void)
+{
+    for (int i = 0; i < 6; ++i) {
+        int x = 28 + (i % 3) * 88;
+        int y = 34 + (i / 3) * 88;
+        if (mouse_x < x || mouse_x >= x + 64 || mouse_y < y || mouse_y >= y + 64) continue;
+        switch (i) {
+        case 0: win_open(WIN_FILES); break;
+        case 1: win_open(WIN_TERM); break;
+        case 2: { int e = win_open(WIN_EDIT); if (e >= 0) { wcopy(wins[e].edit_path, 256, L"\\home\\wct\\untitled.txt"); gedit_load(&wins[e]); } } break;
+        case 3: ui_set = 1; break;
+        case 4: ui_task = 1; ui_task_sel = -1; break;
+        default: ui_about = 1; break;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int ui_tray_click(void)
+{
+    int H = (int)gfx_h, nx, vx, cx;
+    ui_tray_geom(&nx, &vx, &cx, H);
+
+    if (ui_vol) {
+        int w = 300, h = 166, x = (int)gfx_w - w - 10, y = H - 34 - h - 4;
+        if (ui_hit(x + 20, y + h - 44, 60, 26)) { if (ui_vol_lvl > 0) ui_vol_lvl -= 5; return 1; }
+        if (ui_hit(x + 90, y + h - 44, 60, 26)) { if (ui_vol_lvl < 100) ui_vol_lvl += 5; return 1; }
+        if (ui_hit(x + 160, y + h - 44, 76, 26)) { ui_vol_mute = !ui_vol_mute; return 1; }
+        for (int i = 0; i < 16; ++i)
+            if (ui_hit(x + 20 + i * 15, y + 60, 12, 20)) { ui_vol_lvl = i * 6 + 6; return 1; }
+        if (ui_hit(x + w - 92, y + h - 44, 76, 26) || !ui_hit(x, y, w, h)) { ui_vol = 0; return 1; }
+        return 1;
+    }
+    if (ui_net) {
+        int w = 320, h = 268, x = (int)gfx_w - w - 10, y = H - 34 - h - 4;
+        if (ui_hit(x + 16, y + h - 40, 84, 26)) return 1;
+        if (ui_hit(x + w - 104, y + h - 40, 84, 26) || !ui_hit(x, y, w, h)) { ui_net = 0; return 1; }
+        return 1;
+    }
+    if (mouse_y < H - 32) return 0;
+    if (ui_hit(nx, H - 32, 32, 30)) { ui_net = !ui_net; ui_vol = 0; return 1; }
+    if (ui_hit(vx, H - 32, 32, 30)) { ui_vol = !ui_vol; ui_net = 0; return 1; }
+    if (ui_hit(cx, H - 32, 64, 30)) { ui_about = 1; return 1; }
+    return 0;
+}
+
 /* ---------- 汇总绘制 ---------- */
 static void wct_ui_draw(void)
 {
@@ -432,6 +621,8 @@ static void wct_ui_draw(void)
     if (ui_task) ui_draw_task();
     if (ui_about) ui_draw_about();
     if (ui_run) ui_draw_run();
+    if (ui_net) ui_draw_net();
+    if (ui_vol) ui_draw_vol();
 }
 
 /* ---------- 点击 ---------- */
@@ -459,8 +650,8 @@ static int wct_ui_click(void)
                 apply_theme();
                 return 1;
             }
-        for (int i = 0; i < 4; ++i)
-            if (ui_hit(x + 16 + i * 130, y + 124, 120, 26)) { ui_wp = i; if (i == 3) ui_glf_load(); return 1; }
+        for (int i = 0; i < 6; ++i)
+            if (ui_hit(x + 16 + i * 94, y + 124, 88, 26)) { ui_wp = i; if (i == 3) ui_glf_load(); return 1; }
         if (ui_hit(x + w - 108, y + h - 40, 84, 26)) { ui_set = 0; return 1; }
         if (ui_hit(x, y, w, h)) return 1;
         ui_set = 0;
@@ -474,7 +665,19 @@ static int wct_ui_click(void)
             proc_spawn("new-task", "user", "pending", 128);
             ui_task = 0; ui_run = 1; ui_len = 0; ui_input[0] = 0; return 1;
         }
-        if (ui_hit(x + 180, y + h - 44, 110, 26)) { return 1; }
+        int rows = proc_total(); if (rows > 7) rows = 7;
+        for (int i = 0; i < rows; ++i) {
+            int ry = y + 60 + i * 22;
+            if (ui_hit(x + 12, ry - 4, w - 24, 20)) { ui_task_sel = i; return 1; }
+        }
+        if (ui_hit(x + 180, y + h - 44, 120, 26)) {
+            if (ui_task_sel >= 0 && ui_task_sel < proc_total()) {
+                const WCT_PROC *pp = proc_at(ui_task_sel);
+                if (pp && pp->pid != 1) proc_kill(pp->pid);   /* pid 1 = wct-kernel，不许杀 */
+                ui_task_sel = -1;
+            }
+            return 1;
+        }
         if (ui_hit(x + w - 108, y + h - 44, 84, 26)) { ui_task = 0; return 1; }
         if (ui_hit(x, y, w, h)) return 1;
         ui_task = 0;
@@ -494,7 +697,7 @@ static int wct_ui_click(void)
         for (int i = 0; i < UI_MENU_N; ++i) {
             int by = y + 34 + i * 26;
             if (ui_hit(x + 4, by, w - 8, 24)) {
-                ui_menu = 0;
+                ui_menu = 0; ui_net = ui_vol = 0;
                 switch (i) {
                 case 0: win_open(WIN_FILES); break;
                 case 1: win_open(WIN_TERM); break;
@@ -513,9 +716,9 @@ static int wct_ui_click(void)
         return 1;
     }
 
-    /* 任务栏：左下角开始按钮 / 右侧 NET */
-    if (ui_hit(6, (int)gfx_h - 30, 56, 24)) { ui_menu = !ui_menu; return 1; }
-    if (ui_hit((int)gfx_w - 168, (int)gfx_h - 30, 60, 24)) { ui_about = 1; return 1; }
+    if (ui_icon_click()) return 1;
+    if (ui_tray_click()) return 1;
+    if (ui_hit(6, (int)gfx_h - 30, 64, 26)) { ui_menu = !ui_menu; ui_net = ui_vol = 0; return 1; }
     return 0;
 }
 
@@ -594,14 +797,17 @@ static int wct_ui_demo(void)
     ST->BootServices->Stall(4500000);   /* 4.5s：软件渲染下一帧要 2-3s，留够截图窗口 */
     ++ui_demo_stage;
     ui_menu = ui_set = ui_task = ui_about = ui_run = 0;
+    ui_net = ui_vol = 0;
     switch (ui_demo_stage) {
     case 1: ui_menu = 1; break;
     case 2: ui_set = 1; break;
-    case 3: ui_task = 1; break;
-    case 4: ui_about = 1; break;
-    case 5: ui_run = 1; ui_admin = 1; ui_len = 0; ui_input[0] = 0; break;
-    case 6: ui_wp = 3; ui_glf_load(); break;
-    case 7: ui_wp = 0; ui_demo_stage = -1; break;
+    case 3: ui_net = 1; break;
+    case 4: ui_vol = 1; break;
+    case 5: ui_task = 1; ui_task_sel = 1; break;
+    case 6: ui_about = 1; break;
+    case 7: ui_run = 1; ui_admin = 1; ui_len = 0; ui_input[0] = 0; break;
+    case 8: ui_wp = 3; ui_glf_load(); break;
+    case 9: ui_wp = 5; ui_demo_stage = -1; break;
     }
     return 1;
 }

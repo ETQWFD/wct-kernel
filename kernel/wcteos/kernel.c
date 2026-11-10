@@ -3256,7 +3256,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     net_probe();
     proc_set_state(proc_pid_net, net_present ? "running" : "absent");
     if (net_present) {
-        net_link = (net_mmio[E1000_STATUS / 4] & 2u) ? 1 : 0;
         net_arp_test();
         outln_cstr(net_status_line());
     }

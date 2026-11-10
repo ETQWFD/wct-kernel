@@ -68,3 +68,23 @@ audio: HDA codecs=0  verb:no-response
 - 网卡：ARP 由"发一次等 0.8s"改成"最多重发 3 次、每次等 1.5s"，TCG 下不再偶发 `arp:no`。
 - 参考文件：原始 `main.c`（含另一份 `cpuid()` 定义）移到 `reference/main-original.c`，不进编译单元，避免"重复定义"。
 - 其余被指出的项（`EFI_SIMPLE_POINTER_PROTOCOL` / `EFI_ABSOLUTE_POINTER_PROTOCOL` 重复定义、`SP_STATE_OR` 缺 `RelativeMovementZ`、`AP_MODE_OR` 字段错位、两份 `gfx_rgb`、`WIN_SETTINGS` 重复、`ata.c/pci.c/wctmod.c` 重复 include）在本仓库当前代码里不存在：协议结构体只在 `efi.h` 定义一次，`EFI_SIMPLE_POINTER_STATE` 含 `RelativeMovementZ`，`EFI_ABSOLUTE_POINTER_MODE` 字段顺序与 UEFI 规范一致，`gfx_rgb` 只有 1 处定义，`WIN_SETTINGS` 出现 0 次，三个 .c 各 include 1 次（可用 `grep -c` 复核）。
+
+## 七、界面与驱动增补（2026-11-10 第三轮）
+
+- 桌面去掉说明书式文字，改为 6 个图标（文件管理器 / 终端 / 文本编辑器 / 设置 / 任务管理器 / 系统属性），图标为内核内手绘图形，不是图片文件。
+- 任务栏：开始按钮、窗口任务按钮、右侧托盘（音量、网络、HH:MM 数字时钟，时间取自 UEFI RuntimeServices GetTime）。
+- 托盘网络图标：链路与 ARP 正常显示插头，异常显示禁止圈；点击弹出网络面板，有线状态取自驱动，Wi-Fi 区如实标注未检测到无线网卡。
+- 音量面板：16 段音量条、加减、静音，点击段落直接设值。
+- 任务管理器：可选中进程行，“结束进程”调用 proc_kill，内核进程（pid 1）受保护不可结束。
+- 运行框新增 tisal（等价 taskmgr）；右键任务栏直接打开任务管理器，右键桌面切换壁纸。
+- 壁纸扩到 6 档：纯色 / 渐变 / 网格 / 动态 .glf / 纸纹 / 星夜。
+- 中文字形表从 293 扩到 557 个，覆盖全部界面文案，仍为编译期点阵，无运行时字体依赖。
+- 新增 Realtek 8139 驱动（IO BAR）：复位、RCR/TCR、RBSTART、CAPR 收发环；QEMU `-device rtl8139` 实测 `net: rtl8139 52:54:00:12:34:56 link:up arp:ok rx:1 tx:1`。网卡驱动现在有两套：e1000（MMIO 描述符环）与 rtl8139（IO 端口 + 包环）。
+
+## 八、仍未完成 / 明确限制
+
+- HDA：控制器可复位、GCAP 可读，codec 枚举为 0，verb 无应答，播放通路未打通。
+- 无线网卡：未实现 802.11 驱动，系统中没有 Wi-Fi 扫描与连接，托盘如实显示未检测到无线网卡。
+- 安装程序：目前是“把引导与 /wct 负载写进 FAT32 直接从 U 盘/光盘启动”，没有“装到硬盘 + 写 UEFI 引导项 + 装完重启”的完整安装流程。
+- ISO 的 El Torito 入口在本沙箱 OVMF 中会被跳过（落到内置 shell），U 盘镜像路径已验证可启动到桌面。
+- 无 KVM，bench 数字波动大（同机 tsc 2.6~3.2GHz、copy 500~2600MB/s），不能据此得出“比普通系统快”的结论。
