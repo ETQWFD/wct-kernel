@@ -8,6 +8,17 @@
 static int ui_menu, ui_run, ui_admin, ui_set, ui_task, ui_about, ui_lock;
 static int ui_net, ui_vol;          /* 托盘面板 */
 static int ui_vol_lvl = 62, ui_vol_mute;
+static CHAR16 *about_net_line(void)
+{
+    static CHAR16 buf[60];
+    const char *src = net_short_status();
+    int i = 0;
+    for (; src[i] && i < 52; ++i) buf[i] = (CHAR16)src[i];
+    buf[i] = 0;
+    return buf;
+}
+
+static int ui_tz_off = 0;
 static int ui_task_sel = -1;
 static int ui_ctx;                  /* 任务栏右键菜单 */
 static int ui_wp = 0;   /* 0 纯色 1 渐变 2 网格 3 动态 .glf 4 纸纹 5 星夜 */
@@ -288,7 +299,7 @@ static void ui_draw_set(void)
 
     gfx_text_w(x + 16, y + 222, L"系统信息", gfx_dim);
     gfx_text_w(x + 16, y + 242, L"wcteos 0.9-测试  |  WCT 原生内核（不依赖 Linux）  |  x86_64 UEFI", gfx_text_c);
-    gfx_text(x + 16, y + 264, net_status_line(), gfx_dim);
+    gfx_text(x + 16, y + 264, about_net_line(), gfx_dim);
     gfx_text(x + 16, y + 284, audio_status_line(), gfx_dim);
 
     ui_btn_w(x + w - 108, y + h - 40, 84, 26, L"关闭", 0);
@@ -411,7 +422,7 @@ static void ui_draw_about(void)
 
     gfx_text_w(x + 20, y + 156, L"编译：2026-11-10  |  api: 1", gfx_dim);
     gfx_text_w(x + 20, y + 176, L"安装时间：见 \\wct\\install.txt", gfx_dim);
-    gfx_text(x + 20, y + 196, net_status_line(), gfx_dim);
+    gfx_text(x + 20, y + 196, about_net_line(), gfx_dim);
     gfx_text(x + 20, y + 212, audio_status_line(), gfx_dim);
 
     ui_btn_w(x + w - 108, y + h - 44, 84, 26, L"关闭", 0);
@@ -466,7 +477,12 @@ static void ui_draw_clock(int x, int H)
 {
     EFI_TIME t; UINT32 cap = 0;
     int hh = 0, mm = 0;
-    if (!EFI_IS_ERROR(ST->RuntimeServices->GetTime(&t, (void *)&cap))) { hh = t.Hour; mm = t.Minute; }
+    if (!EFI_IS_ERROR(ST->RuntimeServices->GetTime(&t, (void *)&cap))) {
+        /* 固件给的是 UTC；按设置里的时区偏移换算成本地时间 */
+        int off = ui_tz_off;
+        hh = (t.Hour + off) % 24; if (hh < 0) hh += 24;
+        mm = t.Minute;
+    }
     CHAR16 buf[8];
     buf[0] = (CHAR16)(L'0' + (hh / 10) % 10);
     buf[1] = (CHAR16)(L'0' + hh % 10);

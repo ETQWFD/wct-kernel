@@ -659,16 +659,14 @@ static void ico_edit(int x, int y)
 }
 static void ico_set(int x, int y)
 {
-    int cx = x + 21, cy = y + 19;
-    for (int a = 0; a < 8; ++a) {
-        int dx = (a == 1 || a == 2 || a == 5 || a == 6) ? 9 : 0;
-        int dy = (a == 3 || a == 4 || a == 5 || a == 6) ? 9 : 0;
-        if (a == 0 || a == 4) gfx_fill(cx - 2, cy - 13, 4, 26, gfx_accent);
-        else if (a == 2 || a == 6) gfx_fill(cx - 13, cy - 2, 26, 4, gfx_accent);
-        else gfx_fill(cx - dx, cy - dy, 4, 4, gfx_accent);
+    /* 三条滑杆，比齿轮更像“设置” */
+    int xs[3] = { 6, 10, 14 };
+    for (int i = 0; i < 3; ++i) {
+        int yy = y + 10 + i * 8;
+        gfx_fill(x + 6, yy, 30, 2, gfx_rgb(140,136,126));
+        gfx_fill(x + xs[i], yy - 2, 6, 6, gfx_accent);
+        gfx_border(x + xs[i], yy - 2, 6, 6, gfx_rgb(40,60,100));
     }
-    gfx_fill(cx - 7, cy - 7, 14, 14, gfx_rgb(226,222,212));
-    gfx_border(cx - 7, cy - 7, 14, 14, gfx_accent);
 }
 static void ico_task(int x, int y)
 {
@@ -1125,10 +1123,18 @@ static void cmd_gui(void)
     gfx_h = gfx->Mode->Info->VerticalResolution;
     gfx_stride = gfx->Mode->Info->PixelsPerScanLine;
     gfx_hw = (UINT32 *)(UINTN)gfx->Mode->FrameBufferBase;
-    /* 直写帧缓冲模式：省掉每帧 3MB 的软件拷贝，低配/软件渲染下更跟手。
-       需要双缓冲时在此分配 gfx_back，并让 gfx_fb 指向它。 */
+    /* 双缓冲：所有绘制落在 RAM 的后备缓冲，gfx_present() 一次性按行批量刷进显存。
+       分配失败才退回直写，保证低内存下仍能出画面。 */
     gfx_back = NULL;
-    gfx_fb = gfx_hw;
+    {
+        VOID *buf = NULL;
+        UINTN bytes = gfx_stride * gfx_h * 4;
+        if (!EFI_IS_ERROR(ST->BootServices->AllocatePool(EFI_LOADER_DATA, bytes, &buf)) && buf) {
+            gfx_back = (UINT32 *)buf;
+            for (UINTN i = 0; i < gfx_stride * gfx_h; ++i) gfx_back[i] = 0;
+        }
+    }
+    gfx_fb = gfx_back ? gfx_back : gfx_hw;
 
     EFI_SIMPLE_POINTER_PROTOCOL *sp = NULL;
     EFI_GUID spg = { 0x31878C87, 0x0B75, 0x11D5, { 0x9A, 0x4F, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D } };

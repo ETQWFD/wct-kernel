@@ -144,48 +144,35 @@ static void bench_report(void)
     static UINT8 src[1 << 20], dst[1 << 20];
     for (UINTN i = 0; i < sizeof(src); ++i) src[i] = (UINT8)(i * 7u);
 
-    UINT64 t0 = bench_tsc();
-    ST->BootServices->Stall(20000);            /* 20ms */
-    UINT64 t1 = bench_tsc();
-    UINT64 khz = (t1 - t0) / 20;               /* kHz */
-
-    /* 拷贝 1MB * 8 轮 */
+    /* 只报周期数：TSC 频率在 TCG 下由宿主决定，拿 Stall 反推“主频”是错的，
+       这里不换算 MHz，也不据此下“比普通系统快”的结论。 */
     UINT64 c0 = bench_tsc();
     for (int r = 0; r < 8; ++r)
         for (UINTN i = 0; i < sizeof(src); i += 8)
             *(UINT64 *)(void *)(dst + i) = *(UINT64 *)(void *)(src + i);
     UINT64 c1 = bench_tsc();
-    /* 填充 1MB * 8 轮 */
     UINT64 f0 = bench_tsc();
     for (int r = 0; r < 8; ++r)
         for (UINTN i = 0; i < sizeof(src); i += 8)
             *(UINT64 *)(void *)(dst + i) = 0x5A5A5A5A5A5A5A5ALL;
     UINT64 f1 = bench_tsc();
 
-    UINT32 mhz = (UINT32)(khz / 1000);
     UINT64 cyc_copy = c1 - c0, cyc_fill = f1 - f0;
-    UINT32 mb_copy = khz ? (UINT32)((8ull * 1000ull) / (cyc_copy / khz + 1)) : 0;
-    UINT32 mb_fill = khz ? (UINT32)((8ull * 1000ull) / (cyc_fill / khz + 1)) : 0;
-
-    CHAR16 line[96];
+    CHAR16 line[112];
     CHAR16 *q = line;
-    const CHAR16 *p = L"bench: tsc=";
+    const CHAR16 *p = L"bench: copy=";
     while (*p) *q++ = *p++;
-    CHAR16 num[24]; int n = 0, v = (int)mhz;
+    CHAR16 num[24]; int n = 0; UINT64 v = cyc_copy / 8;      /* 每 MB 周期数 */
     if (!v) num[n++] = L'0';
-    while (v) { num[n++] = (CHAR16)(L'0' + v % 10); v /= 10; }
+    while (v) { num[n++] = (CHAR16)(L'0' + (int)(v % 10)); v /= 10; }
     while (n) *q++ = num[--n];
-    p = L"MHz  copy=";
+    p = L" cyc/MB  fill=";
     while (*p) *q++ = *p++;
-    v = (int)mb_copy; n = 0; if (!v) num[n++] = L'0';
-    while (v) { num[n++] = (CHAR16)(L'0' + v % 10); v /= 10; }
+    n = 0; v = cyc_fill / 8;
+    if (!v) num[n++] = L'0';
+    while (v) { num[n++] = (CHAR16)(L'0' + (int)(v % 10)); v /= 10; }
     while (n) *q++ = num[--n];
-    p = L"MB/s  fill=";
-    while (*p) *q++ = *p++;
-    v = (int)mb_fill; n = 0; if (!v) num[n++] = L'0';
-    while (v) { num[n++] = (CHAR16)(L'0' + v % 10); v /= 10; }
-    while (n) *q++ = num[--n];
-    p = L"MB/s";
+    p = L" cyc/MB";
     while (*p) *q++ = *p++;
     *q = 0;
     outln(line);
@@ -3256,6 +3243,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     net_probe();
     proc_set_state(proc_pid_net, net_present ? "running" : "absent");
     if (net_present) {
+        net_dhcp();          /* 取 IP 与网关；失败就不做 ARP，不写死地址 */
         net_arp_test();
         outln_cstr(net_status_line());
     }

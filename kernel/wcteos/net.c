@@ -38,7 +38,8 @@ static int net_present, net_link, net_ready, net_arp_ok, net_tx_tail;
 static int net_kind;              /* 1 = e1000, 2 = rtl8139 */
 static const char *net_drv_name = "none";
 static UINT32 net_rx_packets, net_tx_packets;
-static UINT32 net_ip;          /* 假定 10.0.2.15 */
+static UINT32 net_ip, net_gw, net_mask;   /* 由 DHCP 取得，不再写死 */
+static UINT32 net_xid;
 
 static UINT32 net_rd(UINT32 reg) { return net_mmio[reg / 4]; }
 static void net_wr(UINT32 reg, UINT32 v) { net_mmio[reg / 4] = v; }
@@ -119,10 +120,18 @@ static int net_rtl_probe(void)
     for (int i = 0; i < 6; ++i) net_mac[i] = p_inb(rtl_io + RTL_IDR0 + i);
     int allz = 1;
     for (int i = 0; i < 6; ++i) if (net_mac[i]) allz = 0;
-    if (allz) { net_mac[0]=0x52; net_mac[1]=0x54; net_mac[2]=0x00; net_mac[3]=0x12; net_mac[4]=0x34; net_mac[5]=0x56; }
+    if (allz) {
+        UINT32 lo, hi; __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+        UINT32 v = lo ^ (hi << 13);
+        net_mac[0] = 0x02;                       /* 本地管理、单播 */
+        net_mac[1] = (unsigned char)(v & 0xFF);
+        net_mac[2] = (unsigned char)((v >> 8) & 0xFF);
+        net_mac[3] = (unsigned char)((v >> 16) & 0xFF);
+        net_mac[4] = (unsigned char)((v >> 24) & 0xFF);
+        net_mac[5] = (unsigned char)((v >> 5) & 0xFF);
+    }
 
     rtl_tx_i = 0; rtl_rx_cur = 0; net_tx_tail = 0;
-    net_ip = 0x0A00020F;
     net_kind = 2; net_drv_name = "rtl8139"; net_link = 1; net_ready = 1; net_present = 1;
     return 1;
 }
@@ -146,24 +155,29 @@ static int net_rtl_send(const UINT8 *frame, UINT16 len)
 
 static int net_rtl_poll(UINT8 *out, UINT16 *out_len)
 {
+    /* 8139 接收环：偏移按“4 字节头 + 长度”前进，CAPR = 当前偏移 - 16。
+       旧写法在前进时多加了一次 4，第三帧起会跳过包头，导致 DHCP 能过而 ARP 收不到。 */
+    int cap = RTL_RX_SZ - 16;
     UINT16 cbr = io_inw(rtl_io + RTL_CBR);
     if (cbr == (UINT16)rtl_rx_cur) return 0;
-    UINT8 *pkt = rtl_rxbuf + rtl_rx_cur;
+
+    int hdr = rtl_rx_cur;
+    UINT8 *pkt = rtl_rxbuf + hdr;
     UINT16 status = *(UINT16 *)pkt;
     UINT16 len = *(UINT16 *)(pkt + 2);
-    if (!(status & 0x0001) || len < 4 || len > 1600) {       /* ROK */
-        UINT16 next = (UINT16)((rtl_rx_cur + 4 + (len ? len : 4) + 3) & ~3u);
-        rtl_rx_cur = (int)((next + 4) % (RTL_RX_SZ - 16));
-        p_outb(rtl_io + RTL_CAPR, (UINT8)((rtl_rx_cur - 16) & 0xFF));
-        return 0;
-    }
-    UINT16 dlen = (UINT16)(len - 4);                         /* 去掉 CRC */
+    { char b[40]; int i=0; b[i++]='r';b[i++]='t';b[i++]='l';b[i++]=':';b[i++]=' ';b[i++]='c';b[i++]='b';b[i++]='r';b[i++]='=';for(int k=3;k>=0;--k){int v=(cbr>>(k*4))&15;b[i++]=(char)(v<10?'0'+v:'a'+v-10);}b[i++]=' ';b[i++]='c';b[i++]='u';b[i++]='r';b[i++]='=';for(int k=3;k>=0;--k){int v=(rtl_rx_cur>>(k*4))&15;b[i++]=(char)(v<10?'0'+v:'a'+v-10);}b[i]=0;outln_cstr(b);} 
+    if (len < 4 || len > 1600) len = 4;                       /* 防脏数据卡死 */
+
+    int next = (hdr + 4 + len + 3) & ~3;
+    if (next >= cap) next -= cap;
+    rtl_rx_cur = next;
+    p_outb(rtl_io + RTL_CAPR, (UINT8)((next - 16) & 0xFF));
+
+    if (!(status & 0x0001) || len < 18) return 0;             /* ROK */
+    UINT16 dlen = (UINT16)(len - 4);                          /* 去掉 CRC */
     if (dlen > NET_BUF) dlen = NET_BUF;
     for (int k = 0; k < dlen; ++k) out[k] = pkt[4 + k];
     *out_len = dlen;
-    UINT16 next = (UINT16)((rtl_rx_cur + 4 + len + 3) & ~3u);
-    rtl_rx_cur = (int)((next + 4) % (RTL_RX_SZ - 16));
-    p_outb(rtl_io + RTL_CAPR, (UINT8)((rtl_rx_cur - 16) & 0xFF));
     ++net_rx_packets;
     return 1;
 }
@@ -211,7 +225,6 @@ int net_probe(void)
         hi = (UINT32)net_mac[4] | ((UINT32)net_mac[5] << 8) | (1u << 31);   /* AV */
         net_wr(E1000_RAL0, lo); net_wr(E1000_RAH0, hi);
     }
-    net_ip = 0x0A00020F;    /* 10.0.2.15 */
 
     /* 接收环 */
     for (int i = 0; i < NET_RX_N; ++i)
@@ -282,12 +295,147 @@ static int net_poll(UINT8 *out, UINT16 *out_len)
     return 1;
 }
 
+
+/* ---------- DHCP 客户端（UDP/IP 自己拼，取得 IP 与网关；不做任何写死） ---------- */
+static UINT16 net_csum(const UINT8 *d, int n)
+{
+    UINT32 sum = 0;
+    for (int i = 0; i + 1 < n; i += 2) sum += ((UINT32)d[i] << 8) | d[i + 1];
+    if (n & 1) sum += ((UINT32)d[n - 1] << 8);
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (UINT16)(~sum & 0xFFFF);
+}
+
+/* 网络字节序写入：以前用 *(UINT16*) 直接赋值，在 x86 上会写出反序字段，
+   slirp 直接丢弃——这就是“DHCP 一直没应答”的根因。 */
+static void put16(UINT8 *p, UINT16 v) { p[0] = (UINT8)(v >> 8); p[1] = (UINT8)v; }
+static void put32(UINT8 *p, UINT32 v) { p[0] = (UINT8)(v >> 24); p[1] = (UINT8)(v >> 16); p[2] = (UINT8)(v >> 8); p[3] = (UINT8)v; }
+static UINT32 get32(const UINT8 *p) { return ((UINT32)p[0] << 24) | ((UINT32)p[1] << 16) | ((UINT32)p[2] << 8) | p[3]; }
+
+/* net_ip/net_gw/net_mask 内部按“首字节=第一段”的小端打包，方便逐字节输出 */
+static UINT32 ip_from_be(const UINT8 *p) { return (UINT32)p[0] | ((UINT32)p[1] << 8) | ((UINT32)p[2] << 16) | ((UINT32)p[3] << 24); }
+static void ip_to_be(UINT8 *p, UINT32 v) { p[0] = (UINT8)v; p[1] = (UINT8)(v >> 8); p[2] = (UINT8)(v >> 16); p[3] = (UINT8)(v >> 24); }
+
+static int dhcp_build(UINT8 *f, UINT8 type, UINT32 yiaddr, UINT32 xid)
+{
+    for (int i = 0; i < 342; ++i) f[i] = 0;
+    for (int i = 0; i < 6; ++i) f[i] = 0xFF;
+    for (int i = 0; i < 6; ++i) f[6 + i] = net_mac[i];
+    f[12] = 0x08; f[13] = 0x00;
+
+    UINT8 *ip = f + 14;
+    ip[0] = 0x45; ip[1] = 0;
+    put16(ip + 4, (UINT16)(xid & 0xFFFF));
+    put16(ip + 6, 0);
+    ip[8] = 64; ip[9] = 17;
+    put32(ip + 12, 0);
+    put32(ip + 16, 0xFFFFFFFFu);
+
+    UINT8 *udp = ip + 20;
+    put16(udp + 0, 68); put16(udp + 2, 67);
+    put16(udp + 6, 0);
+
+    UINT8 *b = udp + 8;
+    b[0] = 1; b[1] = 1; b[2] = 6; b[3] = 0;
+    put32(b + 4, xid);
+    put16(b + 8, 0);
+    put16(b + 10, 0x8000);            /* 广播应答 */
+    ip_to_be(b + 16, yiaddr);
+    for (int i = 0; i < 6; ++i) b[28 + i] = net_mac[i];
+    put32(b + 236, 0x63825363u);
+
+    int o = 240;
+    b[o++] = 53; b[o++] = 1; b[o++] = type;
+    b[o++] = 12; b[o++] = 6; b[o++] = 'w'; b[o++] = 'c'; b[o++] = 't';
+    b[o++] = 'e'; b[o++] = 'o'; b[o++] = 's';
+    b[o++] = 55; b[o++] = 3; b[o++] = 1; b[o++] = 3; b[o++] = 6;
+    if (type == 3) {
+        b[o++] = 50; b[o++] = 4; ip_to_be(b + o, yiaddr); o += 4;
+    }
+    b[o++] = 255;
+    int mlen = 300; if (o > mlen) mlen = o;
+
+    put16(ip + 2, (UINT16)(20 + 8 + mlen));
+    put16(udp + 4, (UINT16)(8 + mlen));
+    put16(ip + 10, 0);                /* 先清零再算校验和 */
+    put16(ip + 10, net_csum(ip, 20));
+    return 14 + 20 + 8 + mlen;
+}
+
+static int dhcp_parse(const UINT8 *rx, UINT16 len, UINT32 xid, UINT8 *type,
+                      UINT32 *yiaddr, UINT32 *gw, UINT32 *mask)
+{
+    if (len < 14 + 20 + 8 + 240) return 0;
+    if (rx[12] != 0x08 || rx[13] != 0x00) return 0;
+    const UINT8 *ip = rx + 14;
+    if (ip[9] != 17) return 0;
+    const UINT8 *udp = ip + 20;
+    if (udp[2] != 0x00 || udp[3] != 68) return 0;      /* dst port 68 */
+    const UINT8 *b = udp + 8;
+    if (b[0] != 2) return 0;
+    if (get32(b + 4) != xid) return 0;
+    *yiaddr = ip_from_be(b + 16);
+    int o = 240;
+    while (o + 2 < 340) {
+        UINT8 k = b[o];
+        if (k == 255) break;
+        if (k == 0) { ++o; continue; }
+        UINT8 l = b[o + 1];
+        if (k == 53) *type = b[o + 2];
+        else if (k == 3 && l >= 4) *gw = ip_from_be(b + o + 2);
+        else if (k == 1 && l >= 4) *mask = ip_from_be(b + o + 2);
+        o += 2 + l;
+    }
+    return 1;
+}
+
+int net_dhcp(void)
+{
+    int dhcp_rx_seen = 0;
+    net_ip = net_gw = net_mask = 0;
+    if (!net_ready) return 0;
+    UINT32 lo, hi; __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    net_xid = lo ^ (hi << 7);
+
+    UINT8 tx[342], rx[NET_BUF]; UINT16 rlen = 0;
+    UINT32 offer_ip = 0, gw = 0, mask = 0;
+    UINT8 type = 0;
+
+    for (int round = 0; round < 3; ++round) {
+        int n = dhcp_build(tx, 1, 0, net_xid);     /* DISCOVER */
+        if (!net_send(tx, (UINT16)n)) { ST->BootServices->Stall(20000); continue; }
+        for (int t = 0; t < 400; ++t) {
+            if (net_poll(rx, &rlen)) { ++dhcp_rx_seen; if (dhcp_parse(rx, rlen, net_xid, &type, &offer_ip, &gw, &mask) && type == 2) {
+                goto got_offer;
+            } }
+            ST->BootServices->Stall(3000);
+        }
+    }
+    outln(dhcp_rx_seen ? L"net: dhcp no reply, frames seen" : L"net: dhcp no reply, rx silent");
+    return 0;
+
+got_offer:
+    for (int round = 0; round < 3; ++round) {
+        int n = dhcp_build(tx, 3, offer_ip, net_xid);  /* REQUEST */
+        if (!net_send(tx, (UINT16)n)) { ST->BootServices->Stall(20000); continue; }
+        for (int t = 0; t < 400; ++t) {
+            if (net_poll(rx, &rlen) && dhcp_parse(rx, rlen, net_xid, &type, &offer_ip, &gw, &mask) && type == 5) {
+                net_ip = offer_ip; net_gw = gw; net_mask = mask;
+                return net_ip ? 1 : 0;
+            }
+            ST->BootServices->Stall(3000);
+        }
+    }
+    return 0;
+}
+
+
 /* 发 ARP 请求并等应答：真实验证收发通路 */
 int net_arp_test(void)
 {
-    if (!net_ready) return 0;
+    if (!net_ready || !net_gw) return 0;   /* 没有网关就没有可验证的对端 */
     UINT8 frame[64];
-    for (int i = 0; i < 64; ++i) frame[i] = 0;
+    for (int i = 0; i < 64; ++i) frame[i] = 0;   /* 以太网最小帧 64 字节，8139 对小帧会丢 */
     for (int i = 0; i < 6; ++i) frame[i] = 0xFF;                /* dst broadcast */
     for (int i = 0; i < 6; ++i) frame[6 + i] = net_mac[i];      /* src */
     frame[12] = 0x08; frame[13] = 0x06;                         /* ARP */
@@ -298,11 +446,13 @@ int net_arp_test(void)
     frame[28] = (UINT8)(net_ip & 0xFF); frame[29] = (UINT8)((net_ip >> 8) & 0xFF);
     frame[30] = (UINT8)((net_ip >> 16) & 0xFF); frame[31] = (UINT8)((net_ip >> 24) & 0xFF);
     for (int i = 0; i < 6; ++i) frame[32 + i] = 0;
-    frame[38] = 0x0A; frame[39] = 0x00; frame[40] = 0x02; frame[41] = 0x02;  /* 10.0.2.2 */
+    /* 目标 = DHCP 拿到的默认网关；没有网关就不发，不写死地址 */
+    frame[38] = (UINT8)(net_gw & 0xFF); frame[39] = (UINT8)((net_gw >> 8) & 0xFF);
+    frame[40] = (UINT8)((net_gw >> 16) & 0xFF); frame[41] = (UINT8)((net_gw >> 24) & 0xFF);
     /* 重发最多 3 次：TCG 下 slirp 的应答经常晚于 0.8s，一次不中就判失败太苛刻 */
     UINT8 rx[NET_BUF]; UINT16 len = 0;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        if (!net_send(frame, 42)) { ST->BootServices->Stall(5000); continue; }
+        if (!net_send(frame, 64)) { ST->BootServices->Stall(5000); continue; }
         for (int tries = 0; tries < 500; ++tries) {
             if (net_poll(rx, &len)) {
                 if (len >= 42 && rx[12] == 0x08 && rx[13] == 0x06 && rx[20] == 0x00 && rx[21] == 0x02) {
@@ -321,6 +471,24 @@ const char *net_short_status(void)
     static char b[48];
     int i = 0;
     for (const char *d = net_drv_name; *d && i < 10; ++d) b[i++] = *d;
+    if (net_ip) {
+        b[i++] = ' '; b[i++] = 'i'; b[i++] = 'p'; b[i++] = '=';
+        char t[4]; for (int k = 0; k < 4; ++k) t[k] = (char)((net_ip >> (k * 8)) & 0xFF);
+        for (int k = 0; k < 4; ++k) { if (k) b[i++] = '.'; int v = t[k]; char d[3]; int dn = 0;
+            if (!v) d[dn++] = '0'; while (v) { d[dn++] = (char)('0' + v % 10); v /= 10; }
+            while (dn) b[i++] = d[--dn]; }
+    }
+    if (net_ip) {
+        b[i++] = ' '; b[i++] = 'i'; b[i++] = 'p'; b[i++] = '=';
+        char t[4]; for (int k = 0; k < 4; ++k) t[k] = (char)((net_ip >> (k * 8)) & 0xFF);
+        for (int k = 0; k < 4; ++k) {
+            if (k) b[i++] = '.';
+            int v = t[k]; char d[3]; int dn = 0;
+            if (!v) d[dn++] = '0';
+            while (v) { d[dn++] = (char)('0' + v % 10); v /= 10; }
+            while (dn) b[i++] = d[--dn];
+        }
+    }
     const char *tail = "  link:up  arp:ok";
     if (!net_link) tail = "  link:down";
     else if (!net_arp_ok) tail = "  link:up  arp:no";
@@ -341,6 +509,13 @@ const char *net_status_line(void)
         if (k) line[i++] = ':';
         line[i++] = "0123456789ABCDEF"[net_mac[k] >> 4];
         line[i++] = "0123456789ABCDEF"[net_mac[k] & 15];
+    }
+    if (net_ip) {
+        line[i++] = ' '; line[i++] = 'i'; line[i++] = 'p'; line[i++] = '=';
+        for (int k = 0; k < 4; ++k) {
+            if (k) line[i++] = '.';
+            net_put_dec(line, &i, (net_ip >> (k * 8)) & 0xFF);
+        }
     }
     const char *lk = net_link ? "  link:up" : "  link:down";
     while (*lk) line[i++] = *lk++;
