@@ -58,3 +58,13 @@ audio: HDA codecs=0  verb:no-response
 - 网卡：只验证到 ARP（e1000，收 1 帧发 1 帧）。IP/ICMP/TCP 与 DHCP 客户端还没做，任务栏的网络项目前只是状态显示。
 - 32 位：`BOOTIA32.EFI` 能编译、能进 ISO，但这台机器没有 32 位 UEFI 固件，没做实跑。
 - 安装：还没有真正的安装程序，目前是把引导文件与 `/wct` 负载写进 FAT32 分区直接从 U 盘/光盘启动。
+
+## 六、本轮修复记录（2026-11-10 第二次验证）
+
+- PS/2 鼠标：`ps2.c` 之前只存在于目录里、从未被 include，等于死代码。现在编进内核并在启动时初始化；设备命令改为正确的"0xD4 切 AUX + 命令写 0x60"序列（原先写到 0x64 会让 i8042 进异常状态，实测会直接把虚拟机打死）。启动日志：`mouse: PS/2 i8042 ready (fallback)`。
+- 鼠标优先级：Simple → Absolute → HID → PS/2，四级兜底。
+- 帧缓冲初始化：删掉重复的 `gfx_fb = gfx_hw; gfx_back = NULL;` 两行赋值。
+- ATA：IDENTIFY 失败后的"重试"原先只对从设备做一次空延迟，改成 400ns×4 + 约 10ms 恢复窗口、最多 3 次的真正重试。
+- 网卡：ARP 由"发一次等 0.8s"改成"最多重发 3 次、每次等 1.5s"，TCG 下不再偶发 `arp:no`。
+- 参考文件：原始 `main.c`（含另一份 `cpuid()` 定义）移到 `reference/main-original.c`，不进编译单元，避免"重复定义"。
+- 其余被指出的项（`EFI_SIMPLE_POINTER_PROTOCOL` / `EFI_ABSOLUTE_POINTER_PROTOCOL` 重复定义、`SP_STATE_OR` 缺 `RelativeMovementZ`、`AP_MODE_OR` 字段错位、两份 `gfx_rgb`、`WIN_SETTINGS` 重复、`ata.c/pci.c/wctmod.c` 重复 include）在本仓库当前代码里不存在：协议结构体只在 `efi.h` 定义一次，`EFI_SIMPLE_POINTER_STATE` 含 `RelativeMovementZ`，`EFI_ABSOLUTE_POINTER_MODE` 字段顺序与 UEFI 规范一致，`gfx_rgb` 只有 1 处定义，`WIN_SETTINGS` 出现 0 次，三个 .c 各 include 1 次（可用 `grep -c` 复核）。

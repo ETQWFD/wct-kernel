@@ -59,6 +59,21 @@ static int ps2_read_ack(void)
     return 0;
 }
 
+/* 写一个字节到 AUX 设备数据口 0x60 */
+static int ps2_dev_write(unsigned char v)
+{
+    if (!ps2_wait_write()) return 0;
+    p_outb(0x60, v);
+    return 1;
+}
+/* 设备命令：先 0xD4 切 AUX，再把命令字节写 0x60 */
+static int ps2_dev_cmd(unsigned char cmd)
+{
+    if (!ps2_cmd(0xD4)) return 0;
+    return ps2_dev_write(cmd);
+}
+static int ps2_dev_arg(unsigned char arg) { return ps2_dev_write(arg); }
+
 static unsigned char g_pkt[3];
 static int g_pkt_i = 0;
 static int g_ready = 0;
@@ -82,22 +97,18 @@ int ps2_mouse_init(void)
     ps2_cmd(0xA8);    /* 启用 AUX 口 */
     ps2_cmd_arg(0x20, cfg);
 
-    /* 鼠标：默认设置 + 启用数据上报（采样 100/s，分辨率 4 计数/mm） */
-    if (!ps2_cmd(0xD4)) return 0;      /* 下一条命令发往鼠标 */
-    if (!ps2_cmd_arg(0xF6, 0)) return 0;
-    (void)ps2_read_ack();
-    if (!ps2_cmd(0xD4)) return 0;
-    if (!ps2_cmd_arg(0xF3, 100)) return 0;
-    (void)ps2_read_ack();
-    if (!ps2_cmd(0xD4)) return 0;
-    if (!ps2_cmd_arg(0xE8, 3)) return 0;
-    (void)ps2_read_ack();
-    if (!ps2_cmd(0xD4)) return 0;
-    if (!ps2_cmd_arg(0xF4, 0)) return 0;
-    if (!ps2_read_ack()) {
-        g_ready = 0;
-        return 0;
-    }
+    /* 设备命令走 0x60；写到 0x64 会让 i8042 进异常状态（本次崩溃就是这么来的） */
+    if (!ps2_dev_cmd(0xF6)) return 0;          /* 恢复默认 */
+    if (!ps2_read_ack()) return 0;
+    if (!ps2_dev_cmd(0xF3)) return 0;          /* 采样率 */
+    if (!ps2_dev_arg(100)) return 0;
+    if (!ps2_read_ack()) return 0;
+    if (!ps2_dev_cmd(0xE8)) return 0;          /* 分辨率 */
+    if (!ps2_dev_arg(3)) return 0;
+    if (!ps2_read_ack()) return 0;
+    if (!ps2_dev_cmd(0xF4)) return 0;          /* 开启上报 */
+    if (!ps2_read_ack()) { g_ready = 0; return 0; }
+
     g_pkt_i = 0;
     g_ready = 1;
     return 1;

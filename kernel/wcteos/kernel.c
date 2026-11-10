@@ -2999,6 +2999,7 @@ static void cmd_api(CHAR16 *args)
 }
 
 #include "proc.c"      /* 进程表要在 gui.inc 之前可见 */
+#include "ps2.c"       /* PS/2 鼠标：固件不给指针协议时的兜底 */
 
 #include "gui.inc"
 
@@ -3233,6 +3234,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     proc_init();          /* 真实进程表：先登记内核自身与驱动 */
     disk_probe();
     pci_probe();
+
+    /* PS/2 鼠标：先试 i8042；固件已有 Simple/Absolute 指针时 GUI 仍优先用固件协议 */
+    outln(L"ps2: probe begin");
+    if (ps2_mouse_init())
+        outln(L"mouse: PS/2 i8042 ready (fallback)");
+    else
+        outln(L"mouse: PS/2 i8042 not present");
 
     boot_splash();
     clear_graphics();

@@ -329,6 +329,14 @@ static void mouse_poll(void)
         }
     } else if (hid_ready) {
         hid_poll();
+    } else if (ps2_mouse_ready()) {
+        int dx = 0, dy = 0, btn = 0;
+        if (ps2_mouse_poll(&dx, &dy, &btn)) {
+            if (invert_mouse) { dx = -dx; dy = -dy; }
+            if (dx || dy) { mouse_x += dx * 2; mouse_y += dy * 2; mouse_moved = 1; }
+            mouse_down = (btn & 1) ? 1 : 0;
+            mouse_wheel = 0;
+        }
     }
 
     if (mouse_x < 0) mouse_x = 0;
@@ -1028,9 +1036,8 @@ static void cmd_gui(void)
     gfx_h = gfx->Mode->Info->VerticalResolution;
     gfx_stride = gfx->Mode->Info->PixelsPerScanLine;
     gfx_hw = (UINT32 *)(UINTN)gfx->Mode->FrameBufferBase;
-    gfx_fb = gfx_hw; gfx_back = NULL;
     /* 直写帧缓冲模式：省掉每帧 3MB 的软件拷贝，低配/软件渲染下更跟手。
-       若需要双缓冲，把下面一行改为分配 gfx_back 即可。 */
+       需要双缓冲时在此分配 gfx_back，并让 gfx_fb 指向它。 */
     gfx_back = NULL;
     gfx_fb = gfx_hw;
 
@@ -1043,6 +1050,11 @@ static void cmd_gui(void)
 
     hid_ready = 0; hid_io = NULL;
     if (!mouse && !abs_ptr) hid_init();
+    /* 固件没给指针协议、也没有 USB HID 时，直接用 i8042 */
+    if (!mouse && !abs_ptr && !hid_ready) {
+        if (!ps2_mouse_ready()) ps2_mouse_init();
+        if (ps2_mouse_ready()) outln(L"mouse: PS/2 fallback engaged");
+    }
     invert_mouse = 0;
 
     gfx_original_mode = ST->ConOut->Mode->Mode;

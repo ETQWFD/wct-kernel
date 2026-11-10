@@ -292,7 +292,13 @@ void disk_probe(void)
             ata_num((unsigned long long)s);
             ata_puts("\r\n");
             int found = ata_identify(&d);
-            if (!found && s == 1) { for (int r = 0; r < 2000; ++r) inb((unsigned short)(d.iobase + 7)); found = ata_identify(&d); }
+            /* IDENTIFY 失败时给设备 400ns ×4 + 约 10ms 的恢复窗口再试，
+               最多 3 次；只 delay 一次就放弃会让部分盘/桥接芯片漏检 */
+            for (int attempt = 0; attempt < 2 && !found; ++attempt) {
+                for (int r = 0; r < 4; ++r) inb((unsigned short)(d.iobase + 7));
+                for (volatile int w = 0; w < 60000; ++w) { }
+                found = ata_identify(&d);
+            }
             /* 主设备不存在时不探测从设备：同一条线上从设备不可能单独存在，
                也避免对着空通道的浮空寄存器做无意义等待 */
             if (!found && s == 0) { break; }

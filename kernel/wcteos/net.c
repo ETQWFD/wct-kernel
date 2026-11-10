@@ -185,17 +185,19 @@ int net_arp_test(void)
     frame[30] = (UINT8)((net_ip >> 16) & 0xFF); frame[31] = (UINT8)((net_ip >> 24) & 0xFF);
     for (int i = 0; i < 6; ++i) frame[32 + i] = 0;
     frame[38] = 0x0A; frame[39] = 0x00; frame[40] = 0x02; frame[41] = 0x02;  /* 10.0.2.2 */
-    if (!net_send(frame, 42)) return 0;
-
+    /* 重发最多 3 次：TCG 下 slirp 的应答经常晚于 0.8s，一次不中就判失败太苛刻 */
     UINT8 rx[NET_BUF]; UINT16 len = 0;
-    for (int tries = 0; tries < 400; ++tries) {
-        if (net_poll(rx, &len)) {
-            if (len >= 42 && rx[12] == 0x08 && rx[13] == 0x06 && rx[20] == 0x00 && rx[21] == 0x02) {
-                net_arp_ok = 1;
-                return 1;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (!net_send(frame, 42)) { ST->BootServices->Stall(5000); continue; }
+        for (int tries = 0; tries < 500; ++tries) {
+            if (net_poll(rx, &len)) {
+                if (len >= 42 && rx[12] == 0x08 && rx[13] == 0x06 && rx[20] == 0x00 && rx[21] == 0x02) {
+                    net_arp_ok = 1;
+                    return 1;
+                }
             }
+            ST->BootServices->Stall(3000);
         }
-        ST->BootServices->Stall(2000);
     }
     return 0;
 }
