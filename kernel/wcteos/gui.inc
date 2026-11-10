@@ -1,4 +1,5 @@
 #include "font8x16.h"
+#include "wct_zh.h"
 
 /* WCT-OS windowed GUI with Win95-style drag-outline.
 
@@ -77,8 +78,8 @@ static int clip_enabled = 0;
 #define WIN_FILES 0
 #define WIN_TERM 1
 #define WIN_EDIT 2
-#define WIN_MAX 5
-#define WIN_MAX_LINES 200
+#define WIN_MAX 4
+#define WIN_MAX_LINES 12
 #define WIN_VIEW_LINES 24
 #define WIN_COLS 68
 #define WIN_ENTRIES 32
@@ -172,7 +173,26 @@ static void gfx_char(int x, int y, unsigned char ch, UINT32 c)
 }
 static void gfx_text(int x, int y, const char *s, UINT32 c) { while (*s) gfx_char(x, y, (unsigned char)*s++, c), x += 8; }
 static void gfx_text_n(int x, int y, const char *s, int max, UINT32 c) { while (*s && max-- > 0) gfx_char(x, y, (unsigned char)*s++, c), x += 8; }
-static void gfx_text_w(int x, int y, const CHAR16 *s, UINT32 c) { while (*s) gfx_char(x, y, (*s <= 126) ? (unsigned char)*s : '?', c), x += 8, ++s; }
+static void gfx_char16(int x, int y, unsigned short cp, UINT32 c)
+{
+    int idx = zh_lookup(cp);
+    if (idx < 0) { gfx_char(x, y, '?', c); return; }
+    for (int r = 0; r < 16; ++r) {
+        unsigned short bits = ((unsigned short)zh_bits[idx][r * 2] << 8) | zh_bits[idx][r * 2 + 1];
+        for (int col = 0; col < 16; ++col)
+            if (bits & (0x8000 >> col)) gfx_pixel(x + col, y + r, c);
+    }
+}
+
+/* UTF-16 绘制：ASCII 走 8x16 点阵，其它字符走 16x16 中文点阵（未收录则退化为 '?') */
+static void gfx_text_w(int x, int y, const CHAR16 *s, UINT32 c)
+{
+    while (*s) {
+        if ((unsigned short)*s <= 126) { gfx_char(x, y, (unsigned char)*s, c); x += 8; }
+        else { gfx_char16(x, y, (unsigned short)*s, c); x += 16; }
+        ++s;
+    }
+}
 
 static void gfx_cursor(void)
 {
@@ -466,11 +486,11 @@ static void draw_files(GuiWin *w)
 {
     if (!w->loaded) win_load_files(w);
     int x = w->x + 8, y = w->y + 36;
-    gfx_text(x, y, "Path:", gfx_dim);
-    gfx_text_w(x + 48, y, CWD, gfx_text_c);
+    gfx_text_w(x, y, L"路径：", gfx_dim);
+    gfx_text_w(x + 56, y, CWD, gfx_text_c);
     gfx_fill(x, y + 24, 64, 24, gfx_panel);
     gfx_border(x, y + 24, 64, 24, gfx_accent);
-    gfx_text(x + 10, y + 30, "Back", gfx_text_c);
+    gfx_text_w(x + 10, y + 30, L"返回", gfx_text_c);
     for (int row = 0; row < w->entry_count; ++row) {
         int yy = y + 62 + row * 20;
         if (yy + 16 > w->y + w->h - 10) break;
@@ -533,8 +553,8 @@ static void gedit_draw(GuiWin *w)
         gfx_text(w->x + 8, yy, w->edit[r], gfx_text_c);
         if (r == w->edit_row) gfx_fill(w->x + 8 + w->edit_col * 8, yy + 14, 7, 2, gfx_accent);
     }
-    gfx_text(w->x + 8, w->y + w->h - 20,
-             w->edit_loaded == 2 ? "Saved. Ctrl+S save   Esc close" : "Ctrl+S save   Esc close", gfx_dim);
+    gfx_text_w(w->x + 8, w->y + w->h - 20,
+             w->edit_loaded == 2 ? L"已保存。Ctrl+S 保存   Esc 关闭" : L"Ctrl+S 保存   Esc 关闭", gfx_dim);
 }
 
 static int gedit_len(const char *s) { int n = 0; while (s[n]) ++n; return n; }
@@ -564,11 +584,14 @@ static void gedit_key(GuiWin *w, EFI_INPUT_KEY key)
 static void draw_window(GuiWin *w)
 {
     UINT32 border = (win_from_index(focus_win) == w) ? gfx_accent : gfx_dim;
-    const char *title = w->type == WIN_FILES ? "Files" : (w->type == WIN_TERM ? "Terminal" : "Editor");
-    gfx_fill(w->x, w->y, w->w, w->h, gfx_rgb(8, 8, 14));
+    const CHAR16 *title = w->type == WIN_FILES ? L"文件管理器" : (w->type == WIN_TERM ? L"终端" : L"编辑器");
+    gfx_fill(w->x, w->y, w->w, w->h, gfx_panel);
+    gfx_fill(w->x + w->w, w->y + 2, 2, w->h - 2, gfx_rgb(150,142,130));
+    gfx_fill(w->x + 2, w->y + w->h, w->w - 2, 2, gfx_rgb(150,142,130));
     gfx_border(w->x, w->y, w->w, w->h, border);
     gfx_fill(w->x + 2, w->y + 2, w->w - 4, 28, gfx_top);
-    gfx_text(w->x + 10, w->y + 8, title, border);
+    gfx_fill(w->x + 2, w->y + 30, w->w - 4, 1, gfx_rgb(200,193,180));
+    gfx_text_w(w->x + 10, w->y + 8, title, border);
     gfx_fill(w->x + w->w - 34, w->y + 6, 24, 20, gfx_panel);
     gfx_border(w->x + w->w - 34, w->y + 6, 24, 20, border);
     gfx_text(w->x + w->w - 26, w->y + 9, "X", gfx_text_c);
@@ -581,33 +604,35 @@ static void draw_desktop(void)
 {
     wct_ui_bg();
     gfx_fill(0, 0, (int)gfx_w, 38, gfx_top);
-    gfx_text(14, 11, "wcteos Desktop", gfx_text_c);
-    gfx_text((int)gfx_w - 220, 11, "wcteos 0.9-test  |  WCT kernel", gfx_dim);
+    gfx_text_w(14, 11, L"wcteos 桌面", gfx_text_c);
+    gfx_text_w((int)gfx_w - 260, 11, L"wcteos 0.9-测试  |  WCT 内核", gfx_dim);
     if (invert_mouse) gfx_text((int)gfx_w - 60, 11, "INV", gfx_accent);
-    const char *names[5] = { "Files", "Terminal", "Editor", "Theme", "Exit" };
+    const CHAR16 *names[5] = { L"文件", L"终端", L"编辑器", L"主题", L"退出" };
     for (int i = 0; i < 5; ++i) {
         int x = 40 + i * 180, y = 75;
         gfx_fill(x, y, 160, 74, gfx_panel);
         gfx_border(x, y, 160, 74, gfx_accent);
-        gfx_text(x + 14, y + 14, names[i], gfx_text_c);
-        gfx_text(x + 14, y + 42, i == 2 ? "cycle" : (i == 3 ? "leave" : "open"), gfx_dim);
+        gfx_text_w(x + 14, y + 14, names[i], gfx_text_c);
+        if (i == 2) gfx_text_w(x + 14, y + 42, L"切换", gfx_dim);
+        else if (i == 3) gfx_text_w(x + 14, y + 42, L"离开", gfx_dim);
+        else gfx_text_w(x + 14, y + 42, L"打开", gfx_dim);
     }
-    gfx_text(40, 180, "Drag window title bars. F11 toggles mouse X/Y.", gfx_dim);
-    gfx_text(40, 202, "Drag shows an outline (Win95 style); release to drop.", gfx_dim);
+    gfx_text_w(40, 180, L"拖动窗口标题栏可移动。F11 切换鼠标 X/Y。", gfx_dim);
+    gfx_text_w(40, 202, L"拖动时只画虚线框，松开鼠标落位。", gfx_dim);
     gfx_fill(0, (int)gfx_h - 34, (int)gfx_w, 34, gfx_top);
     /* 左下角开始按钮 */
     gfx_fill(6, (int)gfx_h - 30, 56, 24, gfx_panel);
     gfx_border(6, (int)gfx_h - 30, 56, 24, gfx_accent);
-    gfx_text(20, (int)gfx_h - 26, "MENU", gfx_accent);
+    gfx_text_w(20, (int)gfx_h - 26, L"开始", gfx_accent);
     /* 右侧托盘：网络状态 + 时钟 */
     gfx_fill((int)gfx_w - 168, (int)gfx_h - 30, 60, 24, gfx_panel);
     gfx_border((int)gfx_w - 168, (int)gfx_h - 30, 60, 24, gfx_dim);
-    gfx_text((int)gfx_w - 162, (int)gfx_h - 26, "NET", gfx_dim);
+    gfx_text_w((int)gfx_w - 156, (int)gfx_h - 26, L"网络", gfx_dim);
     int bx = 72;
     for (int i = 0; i < WIN_MAX; ++i) {
         if (!wins[i].alive) continue;
         gfx_fill(bx, (int)gfx_h - 30, 150, 24, i == focus_win ? gfx_accent : gfx_panel);
-        gfx_text(bx + 8, (int)gfx_h - 26, wins[i].type == WIN_FILES ? "Files" : (wins[i].type == WIN_TERM ? "Terminal" : "Editor"), gfx_text_c);
+        gfx_text_w(bx + 8, (int)gfx_h - 26, wins[i].type == WIN_FILES ? L"文件" : (wins[i].type == WIN_TERM ? L"终端" : L"编辑器"), gfx_text_c);
         bx += 160;
     }
 }
@@ -629,10 +654,13 @@ static void apply_theme(void)
     case 1: gfx_bg=gfx_rgb(5,15,10); gfx_top=gfx_rgb(10,45,25); gfx_panel=gfx_rgb(15,32,22); gfx_accent=gfx_rgb(55,220,115); break;
     case 2: gfx_bg=gfx_rgb(0,10,0); gfx_top=gfx_rgb(0,40,0); gfx_panel=gfx_rgb(0,25,0); gfx_accent=gfx_rgb(0,255,0); break;
     case 3: gfx_bg=gfx_rgb(15,10,0); gfx_top=gfx_rgb(60,35,0); gfx_panel=gfx_rgb(35,25,5); gfx_accent=gfx_rgb(255,190,60); break;
+    case 5:                                  /* 纸片：米白纸张 + 细边框 + 墨蓝字 */
+        gfx_bg=gfx_rgb(226,222,212); gfx_top=gfx_rgb(250,248,241);
+        gfx_panel=gfx_rgb(246,243,235); gfx_accent=gfx_rgb(52,86,138); break;
     default: gfx_bg=gfx_rgb(5,10,20); gfx_top=gfx_rgb(20,45,70); gfx_panel=gfx_rgb(15,28,45); gfx_accent=gfx_rgb(100,210,255); break;
     }
-    gfx_text_c = gfx_rgb(235,235,245);
-    gfx_dim = gfx_rgb(145,145,165);
+    if (theme_index == 5) { gfx_text_c = gfx_rgb(38,36,34); gfx_dim = gfx_rgb(120,114,106); }
+    else { gfx_text_c = gfx_rgb(235,235,245); gfx_dim = gfx_rgb(145,145,165); }
 }
 
 /* ---------- drag outline primitives ---------- */
@@ -837,7 +865,7 @@ static void handle_click(void)
                 int e = win_open(WIN_EDIT);
                 if (e >= 0) { wcopy(wins[e].edit_path, 256, L"\\home\\wct\\untitled.txt"); gedit_load(&wins[e]); }
             }
-            else if (i == 3) theme_index = (theme_index + 1) % 5;
+            else if (i == 3) theme_index = (theme_index + 1) % 6;
             else gfx_done = 1;
             return;
         }
@@ -849,7 +877,7 @@ static void handle_click(void)
 static void gui_loop(void)
 {
     gfx_done = 0; focus_win = -1; z_top = 10;
-    theme_index = 4;      /* wcteos 默认蓝色主题 */
+    theme_index = 5;      /* wcteos 默认纸片主题 */
     apply_theme();
     mouse_x = (int)gfx_w / 2; mouse_y = (int)gfx_h / 2;
     mouse_down = mouse_was_down = 0;
@@ -960,6 +988,8 @@ static void gui_loop(void)
         }
 
         if (!drag_handled && dirty) {
+            UINT64 gui_t0 = 0;
+            { UINT32 lo, hi; __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi)); gui_t0 = ((UINT64)hi << 32) | lo; }
             if (full || force_full) {
                 apply_theme();
                 draw_all();
@@ -969,6 +999,11 @@ static void gui_loop(void)
                 gfx_cursor();
                 gfx_present_rect(prev_cx, prev_cy, 10, 16);
                 gfx_present_rect(mouse_x, mouse_y, 10, 16);
+            }
+            {
+                UINT32 lo, hi;
+                __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+                proc_add_ticks(proc_pid_gui, (((UINT64)hi << 32) | lo) - gui_t0);
             }
             dirty = 0; force_full = 0;
         }
@@ -980,8 +1015,13 @@ static void gui_loop(void)
 
 static void cmd_gui(void)
 {
-    if (EFI_IS_ERROR(ST->BootServices->LocateProtocol(&gop_guid, NULL, (VOID **)&gfx)) ||
-        !gfx || !gfx->Mode || !gfx->Mode->FrameBufferBase) {
+    /* OVMF 的 GOP 可能异步加载，给它 3 秒；否则一进入就判“没有帧缓冲”会白屏退出 */
+    EFI_STATUS gs = EFI_IS_ERROR(ST->BootServices->LocateProtocol(&gop_guid, NULL, (VOID **)&gfx));
+    for (int wait = 0; wait < 30 && (gs || !gfx || !gfx->Mode || !gfx->Mode->FrameBufferBase); ++wait) {
+        ST->BootServices->Stall(100000);
+        gs = EFI_IS_ERROR(ST->BootServices->LocateProtocol(&gop_guid, NULL, (VOID **)&gfx));
+    }
+    if (gs || !gfx || !gfx->Mode || !gfx->Mode->FrameBufferBase) {
         outln(L"gui: GOP framebuffer not available"); return;
     }
     gfx_w = gfx->Mode->Info->HorizontalResolution;

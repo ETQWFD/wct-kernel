@@ -120,6 +120,77 @@ static char script_var_values[SCRIPT_VARS][96];
 static int script_var_count;
 static void process_command(CHAR16 *line);
 static int log_save(int quiet);
+static void outln(const CHAR16 *s);
+static void outln_cstr(const char *s);
+static void out(const CHAR16 *s);
+
+static void outln_cstr(const char *s)
+{
+    CHAR16 b[160]; int i = 0;
+    while (*s && i < 159) b[i++] = (CHAR16)*s++;
+    b[i] = 0;
+    outln(b);
+}
+
+static UINT64 bench_tsc(void)
+{
+    UINT32 lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((UINT64)hi << 32) | lo;
+}
+
+static void bench_report(void)
+{
+    static UINT8 src[1 << 20], dst[1 << 20];
+    for (UINTN i = 0; i < sizeof(src); ++i) src[i] = (UINT8)(i * 7u);
+
+    UINT64 t0 = bench_tsc();
+    ST->BootServices->Stall(20000);            /* 20ms */
+    UINT64 t1 = bench_tsc();
+    UINT64 khz = (t1 - t0) / 20;               /* kHz */
+
+    /* 拷贝 1MB * 8 轮 */
+    UINT64 c0 = bench_tsc();
+    for (int r = 0; r < 8; ++r)
+        for (UINTN i = 0; i < sizeof(src); i += 8)
+            *(UINT64 *)(void *)(dst + i) = *(UINT64 *)(void *)(src + i);
+    UINT64 c1 = bench_tsc();
+    /* 填充 1MB * 8 轮 */
+    UINT64 f0 = bench_tsc();
+    for (int r = 0; r < 8; ++r)
+        for (UINTN i = 0; i < sizeof(src); i += 8)
+            *(UINT64 *)(void *)(dst + i) = 0x5A5A5A5A5A5A5A5ALL;
+    UINT64 f1 = bench_tsc();
+
+    UINT32 mhz = (UINT32)(khz / 1000);
+    UINT64 cyc_copy = c1 - c0, cyc_fill = f1 - f0;
+    UINT32 mb_copy = khz ? (UINT32)((8ull * 1000ull) / (cyc_copy / khz + 1)) : 0;
+    UINT32 mb_fill = khz ? (UINT32)((8ull * 1000ull) / (cyc_fill / khz + 1)) : 0;
+
+    CHAR16 line[96];
+    CHAR16 *q = line;
+    const CHAR16 *p = L"bench: tsc=";
+    while (*p) *q++ = *p++;
+    CHAR16 num[24]; int n = 0, v = (int)mhz;
+    if (!v) num[n++] = L'0';
+    while (v) { num[n++] = (CHAR16)(L'0' + v % 10); v /= 10; }
+    while (n) *q++ = num[--n];
+    p = L"MHz  copy=";
+    while (*p) *q++ = *p++;
+    v = (int)mb_copy; n = 0; if (!v) num[n++] = L'0';
+    while (v) { num[n++] = (CHAR16)(L'0' + v % 10); v /= 10; }
+    while (n) *q++ = num[--n];
+    p = L"MB/s  fill=";
+    while (*p) *q++ = *p++;
+    v = (int)mb_fill; n = 0; if (!v) num[n++] = L'0';
+    while (v) { num[n++] = (CHAR16)(L'0' + v % 10); v /= 10; }
+    while (n) *q++ = num[--n];
+    p = L"MB/s";
+    while (*p) *q++ = *p++;
+    *q = 0;
+    outln(line);
+}
+
 static void print_banner(void);
 static void cmd_clear(void);
 static void scopy(char *dst, UINTN cap, const char *src);
@@ -2927,12 +2998,16 @@ static void cmd_api(CHAR16 *args)
     }
 }
 
+#include "proc.c"      /* 进程表要在 gui.inc 之前可见 */
+
 #include "gui.inc"
 
 /* ---- 内核自带驱动与加载器（本内核自有实现，不依赖 Linux） ---- */
 #include "ata.c"
 #include "pci.c"
 #include "wctmod.c"
+#include "net.c"
+#include "audio.c"
 
 /* ---- wcteos 桌面外壳：开始菜单 / 运行框 / 设置 / 任务管理器 / 关于 / 锁屏 ---- */
 #include "wcteos_ui.inc"
@@ -3155,6 +3230,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         }
     }
 
+    proc_init();          /* 真实进程表：先登记内核自身与驱动 */
     disk_probe();
     pci_probe();
 
@@ -3167,6 +3243,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (!ROOT) {
         outc(theme()->error, L"warning: FAT32 volume not available\r\n");
     }
+
+    /* 网络与音频：PCI 枚举 -> 控制器初始化 -> 真实链路测试 */
+    net_probe();
+    proc_set_state(proc_pid_net, net_present ? "running" : "absent");
+    if (net_present) {
+        net_link = (net_mmio[E1000_STATUS / 4] & 2u) ? 1 : 0;
+        net_arp_test();
+        outln_cstr(net_status_line());
+    }
+    audio_probe();
+    proc_set_state(proc_pid_audio, hda_present ? "ready" : "absent");
+    if (hda_present) outln_cstr(audio_status_line());
+
+    /* 内建基准：TSC 校准 + 内存吞吐（结果可写进性能报告） */
+    bench_report();
 
     /* 演示/直启：存在 \wct\autogui 时直接进入桌面 */
     {

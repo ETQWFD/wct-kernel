@@ -6,7 +6,7 @@
    ===================================================================== */
 
 static int ui_menu, ui_run, ui_admin, ui_set, ui_task, ui_about, ui_lock;
-static int ui_wp = 1;
+static int ui_wp = 0;
 static int ui_demo_stage = -1;   /* >=0 表示处于演示序列 */              /* 0 纯色 1 渐变 2 网格 3 动态 .glf */
 static char ui_input[96];
 static int ui_len;
@@ -21,14 +21,39 @@ static unsigned char glf_buf[12 + GLF_MAX_W * GLF_MAX_H * GLF_MAX_F];
 static int glf_w, glf_h, glf_frames, glf_cur, glf_ok;
 static int glf_tick;
 
+static int ui_hit(int x, int y, int w, int h);
+
 static int ui_slen(const char *s) { int n = 0; while (s[n]) ++n; return n; }
 
 static void ui_panel(int x, int y, int w, int h, const char *title)
 {
-    gfx_fill(x, y, w, h, gfx_rgb(9, 13, 24));
+    gfx_fill(x, y, w, h, gfx_panel);
+    gfx_fill(x + w, y + 2, 2, h - 2, gfx_rgb(150,142,130));   /* 纸张投影 */
+    gfx_fill(x + 2, y + h, w - 2, 2, gfx_rgb(150,142,130));
     gfx_border(x, y, w, h, gfx_accent);
     gfx_fill(x + 2, y + 2, w - 4, 26, gfx_top);
+    gfx_fill(x + 2, y + 28, w - 4, 1, gfx_rgb(200,193,180));  /* 标题纸边 */
     gfx_text(x + 10, y + 8, title, gfx_accent);
+}
+
+static void ui_panel_w(int x, int y, int w, int h, const CHAR16 *title)
+{
+    gfx_fill(x, y, w, h, gfx_panel);
+    gfx_fill(x + w, y + 2, 2, h - 2, gfx_rgb(150,142,130));
+    gfx_fill(x + 2, y + h, w - 2, 2, gfx_rgb(150,142,130));
+    gfx_border(x, y, w, h, gfx_accent);
+    gfx_fill(x + 2, y + 2, w - 4, 26, gfx_top);
+    gfx_fill(x + 2, y + 28, w - 4, 1, gfx_rgb(200,193,180));
+    gfx_text_w(x + 10, y + 8, title, gfx_accent);
+}
+
+static int ui_btn_w(int x, int y, int w, int h, const CHAR16 *label, int active)
+{
+    int hot = ui_hit(x, y, w, h);
+    gfx_fill(x, y, w, h, active ? gfx_accent : (hot ? gfx_top : gfx_panel));
+    gfx_border(x, y, w, h, gfx_accent);
+    gfx_text_w(x + 8, y + (h - 16) / 2, label, active ? gfx_rgb(255,255,255) : gfx_text_c);
+    return hot;
 }
 
 static int ui_hit(int x, int y, int w, int h)
@@ -193,21 +218,21 @@ static void ui_draw_run(void)
 {
     int x, y, w, h;
     ui_run_box(&x, &y, &w, &h);
-    ui_panel(x, y, w, h, ui_admin ? "Run (administrator)" : "Run");
-    gfx_fill(x + 14, y + 42, w - 28, 28, gfx_rgb(4, 7, 14));
+    ui_panel_w(x, y, w, h, ui_admin ? L"运行（管理员）" : L"运行");
+    gfx_fill(x + 14, y + 42, w - 28, 28, theme_index == 5 ? gfx_rgb(255,255,252) : gfx_rgb(4, 7, 14));
     gfx_border(x + 14, y + 42, w - 28, 28, gfx_accent);
     gfx_text(x + 20, y + 48, ui_input, gfx_text_c);
     gfx_fill(x + 20 + ui_len * 8, y + 46, 2, 18, gfx_accent);
-    gfx_text(x + 14, y + 78, "wtr terminal | wtcer about | name.wct run | name.wet script", gfx_dim);
-    ui_btn(x + 14, y + h - 40, 132, 26, ui_admin ? "Admin: ON" : "Admin: OFF", ui_admin);
-    ui_btn(x + w - 200, y + h - 40, 84, 26, "OK", 0);
-    ui_btn(x + w - 108, y + h - 40, 84, 26, "Cancel", 0);
+    gfx_text_w(x + 14, y + 78, L"wtr 命令窗口 | wtcer 系统属性 | 名称.wct 运行 | 名称.wet 脚本", gfx_dim);
+    ui_btn_w(x + 14, y + h - 40, 150, 26, ui_admin ? L"管理员：开" : L"管理员：关", ui_admin);
+    ui_btn_w(x + w - 200, y + h - 40, 84, 26, L"确定", 0);
+    ui_btn_w(x + w - 108, y + h - 40, 84, 26, L"取消", 0);
 }
 
 /* ---------- 设置 ---------- */
 static void ui_set_box(int *x0, int *y0, int *w0, int *h0)
 {
-    int w = 560, h = 340;
+    int w = 600, h = 380;
     *w0 = w; *h0 = h;
     *x0 = ((int)gfx_w - w) / 2;
     *y0 = ((int)gfx_h - h) / 2;
@@ -217,27 +242,29 @@ static void ui_draw_set(void)
 {
     int x, y, w, h;
     ui_set_box(&x, &y, &w, &h);
-    ui_panel(x, y, w, h, "Settings");
+    ui_panel_w(x, y, w, h, L"设置");
 
-    gfx_text(x + 16, y + 40, "Theme colour", gfx_dim);
-    const char *names[5] = { "Purple", "Green", "Matrix", "Amber", "Blue" };
-    int idx[5] = { 0, 1, 2, 3, 4 };
-    for (int i = 0; i < 5; ++i)
-        ui_btn(x + 16 + i * 104, y + 60, 96, 26, names[i], theme_index == idx[i]);
+    gfx_text_w(x + 16, y + 40, L"主题颜色", gfx_dim);
+    const CHAR16 *names[6] = { L"紫", L"绿", L"矩阵绿", L"琥珀", L"蓝", L"纸片" };
+    int idx[6] = { 0, 1, 2, 3, 4, 5 };
+    for (int i = 0; i < 6; ++i)
+        ui_btn_w(x + 16 + i * 88, y + 60, 80, 26, names[i], theme_index == idx[i]);
 
-    gfx_text(x + 16, y + 104, "Wallpaper", gfx_dim);
-    const char *wp[4] = { "Solid", "Gradient", "Grid", "Dynamic .glf" };
+    gfx_text_w(x + 16, y + 104, L"壁纸", gfx_dim);
+    const CHAR16 *wp[4] = { L"纯色", L"渐变", L"网格", L"动态壁纸(.glf)" };
     for (int i = 0; i < 4; ++i)
-        ui_btn(x + 16 + i * 130, y + 124, 120, 26, wp[i], ui_wp == i);
+        ui_btn_w(x + 16 + i * 134, y + 124, 126, 26, wp[i], ui_wp == i);
 
-    gfx_text(x + 16, y + 168, "Dynamic wallpaper needs \\wct\\wall\\default.glf (GLF1, RGB332 frames)",
+    gfx_text_w(x + 16, y + 168, L"动态壁纸读取 \\wct\\wall\\default.glf（GLF1 / RGB332 帧）",
              glf_ok ? gfx_accent : gfx_dim);
-    gfx_text(x + 16, y + 188, glf_ok ? "glf loaded: ready" : "glf: not found (falls back to gradient)", gfx_dim);
+    gfx_text_w(x + 16, y + 188, glf_ok ? L"glf 已加载，可以切换" : L"未找到 glf，自动退回渐变", gfx_dim);
 
-    gfx_text(x + 16, y + 222, "System", gfx_dim);
-    gfx_text(x + 16, y + 242, "wcteos 0.9-test  |  WCT kernel (no Linux)  |  x86_64 UEFI", gfx_text_c);
+    gfx_text_w(x + 16, y + 222, L"系统信息", gfx_dim);
+    gfx_text_w(x + 16, y + 242, L"wcteos 0.9-测试  |  WCT 原生内核（不依赖 Linux）  |  x86_64 UEFI", gfx_text_c);
+    gfx_text(x + 16, y + 264, net_status_line(), gfx_dim);
+    gfx_text(x + 16, y + 284, audio_status_line(), gfx_dim);
 
-    ui_btn(x + w - 108, y + h - 40, 84, 26, "Close", 0);
+    ui_btn_w(x + w - 108, y + h - 40, 84, 26, L"关闭", 0);
 }
 
 /* ---------- 任务管理器 ---------- */
@@ -253,41 +280,66 @@ static void ui_draw_task(void)
 {
     int x, y, w, h;
     ui_task_box(&x, &y, &w, &h);
-    ui_panel(x, y, w, h, "Task Manager");
+    ui_panel_w(x, y, w, h, L"任务管理器");
 
-    gfx_text(x + 16, y + 38, "Name", gfx_dim);
-    gfx_text(x + 220, y + 38, "Type", gfx_dim);
-    gfx_text(x + 340, y + 38, "State", gfx_dim);
-    gfx_text(x + 460, y + 38, "Detail", gfx_dim);
+    gfx_text_w(x + 16, y + 38, L"名称", gfx_dim);
+    gfx_text_w(x + 220, y + 38, L"类型", gfx_dim);
+    gfx_text_w(x + 340, y + 38, L"状态", gfx_dim);
+    gfx_text_w(x + 460, y + 38, L"详情", gfx_dim);
 
-    const char *rows[][4] = {
-        { "wct-kernel", "kernel", "running", "0x10000000" },
-        { "shell",      "service", "running", "tty1" },
-        { "desktop",    "gui", "running", "GOP 1024x768" },
-        { "disk",       "driver", "ready",  "ata pio" },
-        { "pci",        "driver", "ready",  "cf8/cfc" },
-    };
-    int n = (int)(sizeof(rows) / sizeof(rows[0]));
+    {   /* 进程数来自内核真实进程表 */
+        CHAR16 cap[48];
+        int k = 0;
+        const CHAR16 *pre = L"进程：";
+        while (*pre) cap[k++] = *pre++;
+        int n = proc_total();
+        cap[k++] = (CHAR16)(L'0' + (n / 10) % 10);
+        cap[k++] = (CHAR16)(L'0' + n % 10);
+        cap[k] = 0;
+        gfx_text_w(x + 300, y + h - 38, cap, gfx_dim);
+    }
+    int n = proc_total();
+    if (n > 7) n = 7;
     for (int i = 0; i < n; ++i) {
+        const WCT_PROC *pp = proc_at(i);
+        if (!pp) break;
         int ry = y + 60 + i * 22;
-        gfx_fill(x + 12, ry - 4, w - 24, 20, (i & 1) ? gfx_panel : gfx_rgb(12, 18, 32));
-        gfx_text(x + 16, ry, rows[i][0], gfx_text_c);
-        gfx_text(x + 220, ry, rows[i][1], gfx_dim);
-        gfx_text(x + 340, ry, rows[i][2], gfx_accent);
-        gfx_text(x + 460, ry, rows[i][3], gfx_dim);
+        gfx_fill(x + 12, ry - 4, w - 24, 20, (i & 1) ? gfx_panel : (theme_index == 5 ? gfx_rgb(238,234,224) : gfx_rgb(12, 18, 32)));
+        char nm[28];
+        int q = 0;
+        if (pp->pid >= 10) nm[q++] = (char)('0' + (pp->pid / 10) % 10);
+        nm[q++] = (char)('0' + pp->pid % 10);
+        nm[q++] = ' ';
+        for (int t2 = 0; pp->name[t2] && q < 27; ++t2) nm[q++] = pp->name[t2];
+        nm[q] = 0;
+        gfx_text(x + 16, ry, nm, gfx_text_c);
+        gfx_text(x + 220, ry, pp->type, gfx_dim);
+        gfx_text(x + 340, ry, pp->state, gfx_accent);
+        gfx_text(x + 460, ry, pp->mem_kb ? "mem" : "", gfx_dim);
+        if (pp->mem_kb) {
+            char mk[16];
+            int q2 = 0;
+            UINT32 mb = pp->mem_kb;
+            char tmp[8]; int tn = 0;
+            if (!mb) tmp[tn++] = '0';
+            while (mb) { tmp[tn++] = (char)('0' + mb % 10); mb /= 10; }
+            while (tn) mk[q2++] = tmp[--tn];
+            mk[q2++] = 'K'; mk[q2] = 0;
+            gfx_text(x + 496, ry, mk, gfx_dim);
+        }
     }
 
-    gfx_text(x + 16, y + h - 72, "New Process opens the Run box; tick Admin there to elevate.",
+    gfx_text_w(x + 16, y + h - 72, L"新建进程会打开运行框，勾选“管理员”即以管理员身份运行",
              gfx_dim);
-    ui_btn(x + 16, y + h - 44, 150, 26, "New Process", 0);
-    ui_btn(x + 180, y + h - 44, 110, 26, "Refresh", 0);
-    ui_btn(x + w - 108, y + h - 44, 84, 26, "Close", 0);
+    ui_btn_w(x + 16, y + h - 44, 150, 26, L"新建进程", 0);
+    ui_btn_w(x + 180, y + h - 44, 110, 26, L"刷新", 0);
+    ui_btn_w(x + w - 108, y + h - 44, 84, 26, L"关闭", 0);
 }
 
 /* ---------- 关于（wtcer） ---------- */
 static void ui_about_box(int *x0, int *y0, int *w0, int *h0)
 {
-    int w = 520, h = 260;
+    int w = 560, h = 300;
     *w0 = w; *h0 = h;
     *x0 = ((int)gfx_w - w) / 2;
     *y0 = ((int)gfx_h - h) / 2;
@@ -297,11 +349,11 @@ static void ui_draw_about(void)
 {
     int x, y, w, h;
     ui_about_box(&x, &y, &w, &h);
-    ui_panel(x, y, w, h, "System properties (wtcer)");
+    ui_panel_w(x, y, w, h, L"系统属性（wtcer）");
 
     gfx_text(x + 20, y + 48, "wcteos 0.9-test", gfx_accent);
-    gfx_text(x + 20, y + 76, "kernel: WCT UEFI native, no Linux underneath", gfx_text_c);
-    gfx_text(x + 20, y + 96, "arch: x86_64 (ia32 build available)", gfx_text_c);
+    gfx_text_w(x + 20, y + 76, L"内核：WCT UEFI 原生内核，底层不依赖 Linux", gfx_text_c);
+    gfx_text_w(x + 20, y + 96, L"架构：x86_64（另有 ia32 构建）", gfx_text_c);
 
     UINT32 a, b, c, d;
     cpuid(0, 0, &a, &b, &c, &d);
@@ -310,32 +362,37 @@ static void ui_draw_about(void)
     vendor[4] = (char)d; vendor[5] = (char)(d >> 8); vendor[6] = (char)(d >> 16); vendor[7] = (char)(d >> 24);
     vendor[8] = (char)c; vendor[9] = (char)(c >> 8); vendor[10] = (char)(c >> 16); vendor[11] = (char)(c >> 24);
     vendor[12] = 0;
-    gfx_text(x + 20, y + 116, "cpu:", gfx_dim);
-    gfx_text(x + 60, y + 116, vendor, gfx_text_c);
+    gfx_text_w(x + 20, y + 116, L"处理器：", gfx_dim);
+    gfx_text(x + 92, y + 116, vendor, gfx_text_c);
 
-    char line[64];
-    line[0] = 'd'; line[1] = 'i'; line[2] = 's'; line[3] = 'k'; line[4] = 's'; line[5] = ':'; line[6] = ' ';
-    int v = disk_count(), i = 7;
-    if (v > 9) line[i++] = (char)('0' + v / 10);
-    line[i++] = (char)('0' + v % 10);
-    line[i++] = ' '; line[i++] = 'p'; line[i++] = 'c'; line[i++] = 'i'; line[i++] = ':'; line[i++] = ' ';
+    CHAR16 wline[64];
+    int i = 0;
+    const CHAR16 *pfx = L"磁盘：";
+    while (*pfx) wline[i++] = *pfx++;
+    int v = disk_count();
+    wline[i++] = (CHAR16)('0' + (v / 10) % 10);
+    wline[i++] = (CHAR16)('0' + v % 10);
+    const CHAR16 *mid = L"  PCI 设备：";
+    while (*mid) wline[i++] = *mid++;
     v = pci_count();
-    if (v > 9) line[i++] = (char)('0' + v / 10);
-    line[i++] = (char)('0' + v % 10);
-    line[i] = 0;
-    gfx_text(x + 20, y + 136, line, gfx_text_c);
+    wline[i++] = (CHAR16)('0' + (v / 10) % 10);
+    wline[i++] = (CHAR16)('0' + v % 10);
+    wline[i] = 0;
+    gfx_text_w(x + 20, y + 136, wline, gfx_text_c);
 
-    gfx_text(x + 20, y + 156, "build: 2026-11-10  |  api: 1", gfx_dim);
-    gfx_text(x + 20, y + 176, "installed: see \\wct\\install.txt", gfx_dim);
+    gfx_text_w(x + 20, y + 156, L"编译：2026-11-10  |  api: 1", gfx_dim);
+    gfx_text_w(x + 20, y + 176, L"安装时间：见 \\wct\\install.txt", gfx_dim);
+    gfx_text(x + 20, y + 196, net_status_line(), gfx_dim);
+    gfx_text(x + 20, y + 212, audio_status_line(), gfx_dim);
 
-    ui_btn(x + w - 108, y + h - 44, 84, 26, "Close", 0);
+    ui_btn_w(x + w - 108, y + h - 44, 84, 26, L"关闭", 0);
 }
 
 /* ---------- 开始菜单 ---------- */
 #define UI_MENU_N 9
 static void ui_menu_box(int *x0, int *y0, int *w0, int *h0)
 {
-    int w = 228, item = 26;
+    int w = 236, item = 26;
     *w0 = w; *h0 = UI_MENU_N * item + 44;
     *x0 = 6;
     *y0 = (int)gfx_h - 34 - *h0 - 6;
@@ -346,14 +403,14 @@ static void ui_draw_menu(void)
 {
     int x, y, w, h;
     ui_menu_box(&x, &y, &w, &h);
-    ui_panel(x, y, w, h, "wcteos");
-    const char *items[UI_MENU_N] = { "Files", "Terminal", "Settings", "Task Manager",
-                                     "Run", "About (wtcer)", "Lock", "Restart", "Shutdown" };
+    ui_panel_w(x, y, w, h, L"wcteos");
+    const CHAR16 *items[UI_MENU_N] = { L"文件管理器", L"终端", L"设置", L"任务管理器",
+                                      L"运行", L"关于（wtcer）", L"锁屏", L"重启", L"关机" };
     for (int i = 0; i < UI_MENU_N; ++i) {
         int by = y + 34 + i * 26;
         if (ui_hit(x + 4, by, w - 8, 24))
             gfx_fill(x + 4, by, w - 8, 24, gfx_panel);
-        gfx_text(x + 16, by + 4, items[i], gfx_text_c);
+        gfx_text_w(x + 16, by + 4, items[i], gfx_text_c);
     }
 }
 
@@ -361,8 +418,8 @@ static void ui_draw_menu(void)
 static void ui_draw_lock(void)
 {
     gfx_fill(0, 0, (int)gfx_w, (int)gfx_h, gfx_rgb(4, 8, 16));
-    gfx_text((int)gfx_w / 2 - 120, (int)gfx_h / 2 - 40, "wcteos is locked", gfx_accent);
-    gfx_text((int)gfx_w / 2 - 160, (int)gfx_h / 2 - 10, "press any key or click to unlock", gfx_dim);
+    gfx_text_w((int)gfx_w / 2 - 104, (int)gfx_h / 2 - 40, L"wcteos 已锁定", gfx_accent);
+    gfx_text_w((int)gfx_w / 2 - 176, (int)gfx_h / 2 - 10, L"按任意键或点击鼠标解锁", gfx_dim);
     gfx_text((int)gfx_w / 2 - 90, (int)gfx_h - 60, "0.9-test", gfx_dim);
 }
 
@@ -413,7 +470,10 @@ static int wct_ui_click(void)
     if (ui_task) {
         int x, y, w, h;
         ui_task_box(&x, &y, &w, &h);
-        if (ui_hit(x + 16, y + h - 44, 150, 26)) { ui_task = 0; ui_run = 1; ui_len = 0; ui_input[0] = 0; return 1; }
+        if (ui_hit(x + 16, y + h - 44, 150, 26)) {
+            proc_spawn("new-task", "user", "pending", 128);
+            ui_task = 0; ui_run = 1; ui_len = 0; ui_input[0] = 0; return 1;
+        }
         if (ui_hit(x + 180, y + h - 44, 110, 26)) { return 1; }
         if (ui_hit(x + w - 108, y + h - 44, 84, 26)) { ui_task = 0; return 1; }
         if (ui_hit(x, y, w, h)) return 1;
@@ -541,7 +601,7 @@ static int wct_ui_demo(void)
     case 4: ui_about = 1; break;
     case 5: ui_run = 1; ui_admin = 1; ui_len = 0; ui_input[0] = 0; break;
     case 6: ui_wp = 3; ui_glf_load(); break;
-    case 7: ui_wp = 1; ui_demo_stage = -1; break;
+    case 7: ui_wp = 0; ui_demo_stage = -1; break;
     }
     return 1;
 }
