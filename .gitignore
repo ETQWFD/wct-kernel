@@ -1,0 +1,4 @@
+build/
+compression/wctetool
+*.o
+*.wcte
