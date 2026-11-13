@@ -98,6 +98,9 @@ typedef struct {
     int edit_lines, edit_row, edit_col;
     CHAR16 edit_path[256];
     int edit_loaded;
+    int sel;                 /* 文件管理器选中行，-1 表示未选 */
+    int prop_show;           /* 属性面板是否展开 */
+    int prop_msg;            /* 0=属性 1=删除成功 2=拒绝访问 3=删除失败 */
 } GuiWin;
 
 static GuiWin wins[WIN_MAX];
@@ -112,6 +115,8 @@ static int ui_tray_click(void);
 static int ui_icon_click(void);
 static int net_link_up(void);
 static const char *net_short_status(void);
+static void ui_desk_menu_open(int x, int y);
+static void ui_desk_draw_menu(void);
 static void ui_open_taskmgr(void);
 static void ui_next_wallpaper(void);
 static void wct_ui_open_file(const CHAR16 *path);
@@ -196,8 +201,20 @@ static void gfx_char16(int x, int y, unsigned short cp, UINT32 c)
 static void gfx_text_w(int x, int y, const CHAR16 *s, UINT32 c)
 {
     while (*s) {
-        if ((unsigned short)*s <= 126) { gfx_char(x, y, (unsigned char)*s, c); x += 8; }
-        else { gfx_char16(x, y, (unsigned short)*s, c); x += 16; }
+        unsigned short cp = (unsigned short)*s;
+        unsigned char sub = 0;
+        if (cp == 0xFF0C) sub = ',';
+        else if (cp == 0xFF08) sub = '(';
+        else if (cp == 0xFF09) sub = ')';
+        else if (cp == 0xFF1A) sub = ':';
+        else if (cp == 0xFF1B) sub = ';';
+        else if (cp == 0xFF01) sub = '!';
+        else if (cp == 0xFF1F) sub = '?';
+        else if (cp == 0x3002) sub = '.';
+        else if (cp == 0x201C || cp == 0x201D) sub = '"';
+        if (sub) { gfx_char(x, y, sub, c); x += 8; }
+        else if (cp <= 126) { gfx_char(x, y, (unsigned char)cp, c); x += 8; }
+        else { gfx_char16(x, y, cp, c); x += 16; }
         ++s;
     }
 }
@@ -496,6 +513,18 @@ static void term_execute(GuiWin *w)
     w->input_len = 0; w->input[0] = 0;
 }
 
+
+static int wstr_contains(const CHAR16 *hay, const CHAR16 *needle)
+{
+    if (!needle[0]) return 1;
+    for (int i = 0; hay[i]; ++i) {
+        int j = 0;
+        while (needle[j] && hay[i + j] == needle[j]) ++j;
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
 static void win_load_files(GuiWin *w)
 {
     w->entry_count = 0;
@@ -517,6 +546,88 @@ static void win_load_files(GuiWin *w)
     dir->Close(dir); w->loaded = 1;
 }
 
+
+static void file_full_path(GuiWin *w, int row, CHAR16 *out, int cap)
+{
+    wcopy(out, cap, CWD);
+    if (wlen(out) && out[wlen(out) - 1] != L'\\') wcat(out, cap, L"\\");
+    if (row >= 0 && row < w->entry_count) wcat(out, cap, w->entries[row].name);
+}
+
+/* 系统文件保护：\EFI 下的引导文件、.dwc 依赖声明、.glf 壁纸不允许删除 */
+static int file_is_protected(const CHAR16 *path, const CHAR16 *name)
+{
+    if (wstr_contains(path, L"\\EFI")) return 1;
+    if (wstr_contains(path, L"\\wct\\sys")) return 1;
+    if (weq(name, L"oobe.cfg") || weq(name, L"nooobe") || weq(name, L"autorun")) return 1;
+    int n = wlen(name);
+    if (n > 4) {
+        const CHAR16 *ext = name + n - 4;
+        if (weq(ext, L".dwc") || weq(ext, L".glf")) return 1;
+    }
+    if (weq(name, L"BOOTX64.EFI") || weq(name, L"BOOTIA32.EFI")) return 1;
+    return 0;
+}
+
+
+/* 新建文件/文件夹：桌面右键使用 */
+static int file_create(const CHAR16 *path, int isdir)
+{
+    EFI_FILE_PROTOCOL *f = NULL;
+    if (!open_path(path, &f, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0)) return 0;
+    if (isdir) {
+        static UINT8 ib[512];
+        for (int i = 0; i < 512; ++i) ib[i] = 0;
+        EFI_FILE_INFO *fi = (EFI_FILE_INFO *)ib;
+        fi->Attribute = EFI_FILE_DIRECTORY;
+        int n = 0; while (path[n] && n < 200) ++n;
+        /* 取文件名部分 */
+        int st = n; while (st > 0 && path[st - 1] != L'\\') --st;
+        int k = 0; for (int i = st; i < n && k < 200; ++i) fi->FileName[k++] = path[i];
+        fi->FileName[k] = 0;
+        f->SetInfo(f, &file_info_guid, sizeof(EFI_FILE_INFO) + k * 2, ib);
+    }
+    f->Close(f);
+    return 1;
+}
+
+static void file_unique_name(const CHAR16 *base, const CHAR16 *ext, CHAR16 *out, int cap)
+{
+    wcopy(out, cap, base); if (ext && ext[0]) wcat(out, cap, ext);
+    CHAR16 path[256];
+    EFI_FILE_PROTOCOL *f = NULL;
+    for (int i = 2; i < 10; ++i) {
+        wcopy(path, 256, CWD); wcat(path, 256, L"\\"); wcat(path, 256, out);
+        if (!open_path(path, &f, EFI_FILE_MODE_READ, 0)) return;
+        f->Close(f);
+        wcopy(out, cap, base);
+        CHAR16 num[4]; num[0] = (CHAR16)(L'0' + i); num[1] = 0;
+        wcat(out, cap, num); if (ext && ext[0]) wcat(out, cap, ext);
+    }
+}
+
+static void file_make(const CHAR16 *base, const CHAR16 *ext, int isdir)
+{
+    CHAR16 name[64], path[256];
+    file_unique_name(base, ext, name, 64);
+    wcopy(path, 256, CWD); wcat(path, 256, L"\\"); wcat(path, 256, name);
+    file_create(path, isdir);
+}
+
+static void file_delete(GuiWin *w)
+{
+    if (w->sel < 0 || w->sel >= w->entry_count) { w->prop_msg = 3; return; }
+    CHAR16 path[256];
+    file_full_path(w, w->sel, path, sizeof(path) / sizeof(path[0]));
+    if (file_is_protected(path, w->entries[w->sel].name)) { w->prop_msg = 2; return; }
+    EFI_FILE_PROTOCOL *f = NULL;
+    if (!open_path(path, &f, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) { w->prop_msg = 2; return; }
+    EFI_STATUS st = f->Delete(f);
+    w->prop_msg = EFI_IS_ERROR(st) ? 3 : 1;
+    w->loaded = 0;
+    w->sel = -1;
+}
+
 static void draw_files(GuiWin *w)
 {
     if (!w->loaded) win_load_files(w);
@@ -526,11 +637,57 @@ static void draw_files(GuiWin *w)
     gfx_fill(x, y + 24, 64, 24, gfx_panel);
     gfx_border(x, y + 24, 64, 24, gfx_accent);
     gfx_text_w(x + 10, y + 30, L"返回", gfx_text_c);
+
     for (int row = 0; row < w->entry_count; ++row) {
         int yy = y + 62 + row * 20;
-        if (yy + 16 > w->y + w->h - 10) break;
+        if (yy + 16 > w->y + w->h - 44) break;
+        if (row == w->sel) gfx_fill(x, yy - 2, w->w - 16, 18, gfx_rgb(215,208,192));
         gfx_text_w(x + 18, yy, w->entries[row].name, w->entries[row].dir ? gfx_accent : gfx_text_c);
         if (w->entries[row].dir) gfx_text(x + 18 + (int)wlen(w->entries[row].name) * 8, yy, "/", gfx_accent);
+    }
+
+    /* 底部三个按钮 */
+    int by = w->y + w->h - 32;
+    const CHAR16 *lbl[3] = { L"属性", L"删除", L"刷新" };
+    int bw = 62, gap = 8, bx = x;
+    for (int i = 0; i < 3; ++i) {
+        gfx_fill(bx, by, bw, 22, gfx_panel);
+        gfx_border(bx, by, bw, 22, gfx_accent);
+        gfx_text_w(bx + 8, by + 3, lbl[i], gfx_text_c);
+        bx += bw + gap;
+    }
+
+    if (w->prop_show && w->sel >= 0 && w->sel < w->entry_count) {
+        GuiEnt *e = &w->entries[w->sel];
+        int px = x + 210, pw = w->w - 226;
+        if (pw < 120) { px = x; pw = w->w - 16; }
+        gfx_fill(px, y + 24, pw, 140, gfx_rgb(238,234,224));
+        gfx_border(px, y + 24, pw, 140, gfx_accent);
+        gfx_text_w(px + 8, y + 30, L"属性", gfx_accent);
+        gfx_text_w(px + 8, y + 52, L"名称", gfx_dim);
+        gfx_text_w(px + 52, y + 52, e->name, gfx_text_c);
+        gfx_text_w(px + 8, y + 72, L"类型", gfx_dim);
+        gfx_text_w(px + 52, y + 72, e->dir ? L"文件夹" : L"文件", gfx_text_c);
+
+        CHAR16 line[64]; line[0] = 0;
+        if (!e->dir) {
+            CHAR16 num[24]; int si = 0; UINT64 v = e->size;
+            if (!v) num[si++] = L'0';
+            else { CHAR16 t[20]; int ti = 0; while (v && ti < 19) { t[ti++] = (CHAR16)(L'0' + (v % 10)); v /= 10; } while (ti) num[si++] = t[--ti]; }
+            num[si] = 0;
+            wcopy(line, 64, num); wcat(line, 64, L" 字节");
+        } else wcopy(line, 64, L"—");
+        gfx_text_w(px + 8, y + 92, L"大小", gfx_dim);
+        gfx_text_w(px + 52, y + 92, line, gfx_text_c);
+
+        CHAR16 path[256];
+        file_full_path(w, w->sel, path, 256);
+        int prot = file_is_protected(path, e->name);
+        gfx_text_w(px + 8, y + 112, prot ? L"系统文件，受保护" : L"普通文件，可删除", prot ? gfx_rgb(170,60,50) : gfx_dim);
+
+        if (w->prop_msg == 1) gfx_text_w(px + 8, y + 132, L"已删除", gfx_accent);
+        if (w->prop_msg == 2) gfx_text_w(px + 8, y + 132, L"拒绝访问：系统文件不可删除", gfx_rgb(170,60,50));
+        if (w->prop_msg == 3) gfx_text_w(px + 8, y + 132, L"删除失败", gfx_rgb(170,60,50));
     }
 }
 
@@ -538,18 +695,23 @@ static int win_rows(GuiWin *w) { int r = (w->h - 80) / 16; if (r < 2) r = 2; if 
 
 static void draw_term(GuiWin *w)
 {
+    gfx_fill(w->x + 2, w->y + 28, w->w - 4, w->h - 30, gfx_rgb(22, 24, 28));
     int rows = win_rows(w);
     int start = w->trow - rows + 1 - w->scroll;
     if (start < 0) start = 0; if (start > w->trow) start = w->trow;
     for (int r = 0; r < rows; ++r) {
         int line = start + r;
         if (line >= 0 && line <= w->trow)
-            gfx_text_n(w->x + 8, w->y + 38 + r * 16, w->text[line], WIN_COLS, gfx_text_c);
+            gfx_text_n(w->x + 8, w->y + 38 + r * 16, w->text[line], WIN_COLS, gfx_rgb(214,220,228));
     }
-    int yy = w->y + w->h - 24;
-    gfx_text(w->x + 8, yy, "tty2>", gfx_accent);
-    gfx_text(w->x + 80, yy, w->input, gfx_text_c);
-    gfx_fill(w->x + 80 + w->input_len * 8, yy + 14, 7, 2, gfx_text_c);
+    /* 像 Linux 一样：提示符紧跟最后一行输出，而不是钉在窗口底部 */
+    int used = 0;
+    for (int r = 0; r < rows; ++r) { int line = start + r; if (line >= 0 && line <= w->trow) used = r + 1; }
+    int yy = w->y + 38 + used * 16;
+    if (yy > w->y + w->h - 24) yy = w->y + w->h - 24;
+    gfx_text(w->x + 8, yy, "tty2>", gfx_rgb(126, 200, 132));
+    gfx_text(w->x + 80, yy, w->input, gfx_rgb(224, 230, 238));
+    gfx_fill(w->x + 80 + w->input_len * 8, yy + 14, 7, 2, gfx_rgb(224, 230, 238));
 }
 
 static void gedit_load(GuiWin *w)
@@ -696,9 +858,21 @@ static void draw_icon_cell(int x, int y, int kind, const CHAR16 *label)
     case 4: ico_task(x + 10, y + 10); break;
     default: ico_info(x + 10, y + 10); break;
     }
-    int lw = 0;
-    for (const CHAR16 *q = label; *q; ++q) lw += ((unsigned short)*q <= 126) ? 8 : 16;
-    gfx_text_w(x + (64 - lw) / 2, y + 50, label, hot ? gfx_accent : gfx_text_c);
+    /* 桌面图标格只有 64px 宽，中文 16px/字：超过 4 字必须折行，否则会被裁掉半截 */
+    UINT32 col = hot ? gfx_accent : gfx_text_c;
+    CHAR16 l1[5] = { 0 }, l2[16] = { 0 };
+    int n = 0; for (const CHAR16 *q = label; *q; ++q) ++n;
+    int cut = (n > 4) ? (n + 1) / 2 : n;   /* 5 字拆 3+2，6 字拆 3+3，避免出现孤字 */
+    int k = 0;
+    for (const CHAR16 *q = label; *q && k < cut; ++q) l1[k++] = *q;
+    int j = 0;
+    for (const CHAR16 *q = label + cut; *q && j < 14; ++q) l2[j++] = *q;
+    int w1 = 0; for (int t = 0; l1[t]; ++t) w1 += ((unsigned short)l1[t] <= 126) ? 8 : 16;
+    gfx_text_w(x + (64 - w1) / 2, y + 46, l1, col);
+    if (l2[0]) {
+        int w2 = 0; for (int t = 0; l2[t]; ++t) w2 += ((unsigned short)l2[t] <= 126) ? 8 : 16;
+        gfx_text_w(x + (64 - w2) / 2, y + 62, l2, col);
+    }
 }
 
 #define DESK_ICONS 6
@@ -900,7 +1074,7 @@ static void handle_click(void)
     if (mouse_rclick) {
         mouse_rclick = 0;
         if (mouse_y >= (int)gfx_h - 34) ui_open_taskmgr();
-        else ui_next_wallpaper();
+        else ui_desk_menu_open(mouse_x, mouse_y);
         return;
     }
     if (wct_ui_click()) return;
@@ -912,6 +1086,13 @@ static void handle_click(void)
         if (lx >= w->w - 36 && ly >= 4 && ly <= 28) { win_close(wi); return; }
         if (ly < 30) { dragging = wi; drag_dx = mouse_x - w->x; drag_dy = mouse_y - w->y; return; }
         if (w->type == WIN_FILES) {
+            if (ly >= w->h - 34 && ly <= w->h - 8 && lx >= 8) {
+                int bi = (lx - 8) / 70;
+                if (bi == 0) { if (w->sel < 0 && w->entry_count) w->sel = 0; w->prop_show = 1; w->prop_msg = 0; }
+                else if (bi == 1) file_delete(w);
+                else if (bi == 2) { w->loaded = 0; w->prop_show = 0; }
+                return;
+            }
             if (lx >= 8 && lx < 72 && ly >= 60 && ly < 84) {
                 CHAR16 parent[256];
                 normalize_path(L"..", parent, sizeof(parent) / sizeof(parent[0]));
@@ -921,6 +1102,7 @@ static void handle_click(void)
             if (ly >= 98) {
                 int row = (ly - 98) / 20;
                 if (row < w->entry_count) {
+                    w->sel = row; w->prop_show = 0; w->prop_msg = 0;
                     CHAR16 next[256];
                     wcopy(next, sizeof(next) / sizeof(next[0]), CWD);
                     if (wlen(next) && next[wlen(next) - 1] != L'\\')
@@ -935,6 +1117,8 @@ static void handle_click(void)
                     } else {
                         int elen = (int)wlen(next);
                         if ((elen >= 4 && weq(next + elen - 4, L".wct")) ||
+                            (elen >= 4 && weq(next + elen - 4, L".cok")) ||
+                            (elen >= 5 && weq(next + elen - 5, L".wxtk")) ||
                             (elen >= 4 && weq(next + elen - 4, L".wet")) ||
                             (elen >= 4 && weq(next + elen - 4, L".dwc"))) {
                             wct_ui_open_file(next);
@@ -978,6 +1162,14 @@ static void gui_loop(void)
     mouse_down = mouse_was_down = 0;
     cursor_bg_x = cursor_bg_y = -1;
     for (int i = 0; i < WIN_MAX; ++i) wins[i].alive = 0;
+    /* 测试用：\wct\autoterm 存在时开机自动开一个终端窗口 */
+    {
+        EFI_FILE_PROTOCOL *f = NULL;
+        if (open_path(L"\\wct\\autoterm", &f, EFI_FILE_MODE_READ, 0)) {
+            f->Close(f);
+            win_open(WIN_TERM);
+        }
+    }
     dframe_end();
     int dirty = 1, force_full = 1;
 

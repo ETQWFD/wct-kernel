@@ -108,6 +108,19 @@ int wct_run_file(EFI_FILE_PROTOCOL *root, const CHAR16 *path)
     unsigned char *img = m_read_file(root, path, &n);
     if (!img) { m_puts("  [wct] module not found\r\n"); return -1; }
 
+    /* 打包/混淆格式 WCTX：magic + u32 key + u32 len + XOR 载荷（载荷是完整的 WCT1 镜像）。
+       只是提高反编译门槛，不是密码学意义上的加密。 */
+    if (n >= 12 && img[0] == 'W' && img[1] == 'C' && img[2] == 'T' && img[3] == 'X') {
+        unsigned int key = m_rd32(img + 4);
+        unsigned int pl = m_rd32(img + 8);
+        if (pl + 12 > n) { m_puts("  [wct] packed image truncated\r\n"); m_free(img); return -1; }
+        unsigned char *dec = (unsigned char *)m_alloc(pl ? pl : 1);
+        if (!dec) { m_free(img); return -1; }
+        for (unsigned int i = 0; i < pl; ++i) dec[i] = (unsigned char)(img[12 + i] ^ (unsigned char)(key >> ((i & 3) * 8)));
+        m_free(img);
+        img = dec; n = pl;
+    }
+
     if (n < 24 || !(img[0] == 'W' && img[1] == 'C' && img[2] == 'T' && img[3] == '1')) {
         m_puts("  [wct] bad magic: ");
         for (int q = 0; q < 8; ++q) { m_putu(img[q]); m_puts(" "); }

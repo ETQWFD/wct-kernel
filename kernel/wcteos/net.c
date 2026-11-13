@@ -38,6 +38,8 @@ static int net_present, net_link, net_ready, net_arp_ok, net_tx_tail;
 static int net_kind;              /* 1 = e1000, 2 = rtl8139 */
 static const char *net_drv_name = "none";
 static UINT32 net_rx_packets, net_tx_packets;
+static UINT8 net_gw_mac[6];
+static int net_dhcp_ok;
 static UINT32 net_ip, net_gw, net_mask;   /* 由 DHCP 取得，不再写死 */
 static UINT32 net_xid;
 
@@ -95,7 +97,7 @@ static int net_rtl_probe(void)
         const PCI_INFO *p = pci_get(i);
         if (!p || p->class_code != 0x02) continue;
         if (p->vendor != 0x10EC) continue;                 /* Realtek */
-        if (p->device != 0x8139 && p->device != 0x8139) continue;
+        if (p->device != 0x8139 && p->device != 0x8138) continue;
         if (!(p->bar[0] & 1u)) continue;                   /* 需要 IO BAR */
         io = p->bar[0] & 0xFFFC;
         break;
@@ -420,7 +422,7 @@ got_offer:
         if (!net_send(tx, (UINT16)n)) { ST->BootServices->Stall(20000); continue; }
         for (int t = 0; t < 400; ++t) {
             if (net_poll(rx, &rlen) && dhcp_parse(rx, rlen, net_xid, &type, &offer_ip, &gw, &mask) && type == 5) {
-                net_ip = offer_ip; net_gw = gw; net_mask = mask;
+                net_ip = offer_ip; net_gw = gw; net_mask = mask; net_dhcp_ok = 1;
                 return net_ip ? 1 : 0;
             }
             ST->BootServices->Stall(3000);
@@ -456,6 +458,7 @@ int net_arp_test(void)
         for (int tries = 0; tries < 500; ++tries) {
             if (net_poll(rx, &len)) {
                 if (len >= 42 && rx[12] == 0x08 && rx[13] == 0x06 && rx[20] == 0x00 && rx[21] == 0x02) {
+                    for (int k = 0; k < 6; ++k) net_gw_mac[k] = rx[22 + k];
                     net_arp_ok = 1;
                     return 1;
                 }
@@ -466,33 +469,32 @@ int net_arp_test(void)
     return 0;
 }
 
+static int put_dec(char *b, int i, int cap, UINT32 v)
+{
+    char t[10]; int n = 0;
+    if (!v) t[n++] = '0';
+    while (v && n < 10) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n && i < cap - 1) b[i++] = t[--n];
+    return i;
+}
+
+static int put_ip(char *b, int i, int cap, UINT32 v)
+{
+    for (int k = 0; k < 4 && i < cap - 1; ++k) {
+        if (k) b[i++] = '.';
+        i = put_dec(b, i, cap, (v >> (k * 8)) & 0xFF);
+    }
+    return i;
+}
+
 const char *net_short_status(void)
 {
-    static char b[48];
-    int i = 0;
+    static char b[96];
+    int cap = (int)sizeof(b), i = 0;
     for (const char *d = net_drv_name; *d && i < 10; ++d) b[i++] = *d;
-    if (net_ip) {
-        b[i++] = ' '; b[i++] = 'i'; b[i++] = 'p'; b[i++] = '=';
-        char t[4]; for (int k = 0; k < 4; ++k) t[k] = (char)((net_ip >> (k * 8)) & 0xFF);
-        for (int k = 0; k < 4; ++k) { if (k) b[i++] = '.'; int v = t[k]; char d[3]; int dn = 0;
-            if (!v) d[dn++] = '0'; while (v) { d[dn++] = (char)('0' + v % 10); v /= 10; }
-            while (dn) b[i++] = d[--dn]; }
-    }
-    if (net_ip) {
-        b[i++] = ' '; b[i++] = 'i'; b[i++] = 'p'; b[i++] = '=';
-        char t[4]; for (int k = 0; k < 4; ++k) t[k] = (char)((net_ip >> (k * 8)) & 0xFF);
-        for (int k = 0; k < 4; ++k) {
-            if (k) b[i++] = '.';
-            int v = t[k]; char d[3]; int dn = 0;
-            if (!v) d[dn++] = '0';
-            while (v) { d[dn++] = (char)('0' + v % 10); v /= 10; }
-            while (dn) b[i++] = d[--dn];
-        }
-    }
-    const char *tail = "  link:up  arp:ok";
-    if (!net_link) tail = "  link:down";
-    else if (!net_arp_ok) tail = "  link:up  arp:no";
-    for (const char *q = tail; *q && i < 46; ++q) b[i++] = *q;
+    if (net_ip) { b[i++] = ' '; b[i++] = 'i'; b[i++] = 'p'; b[i++] = '='; i = put_ip(b, i, cap, net_ip); }
+    const char *tail = net_link ? (net_arp_ok ? "  link:up  arp:ok" : "  link:up  arp:no") : "  link:down";
+    for (const char *q = tail; *q && i < cap - 1; ++q) b[i++] = *q;
     b[i] = 0;
     return b;
 }
@@ -530,3 +532,106 @@ const char *net_status_line(void)
 }
 
 #endif
+
+
+/* ---------- 网络信息 / ping（ICMP echo，真实收发） ---------- */
+static void ip_str(UINT32 v, char *out)
+{
+    /* net_ip 系列按“首字节在低字节”打包 */
+    int p[4] = { (int)(v & 0xFF), (int)((v >> 8) & 0xFF), (int)((v >> 16) & 0xFF), (int)((v >> 24) & 0xFF) };
+    int o = 0;
+    for (int i = 0; i < 4; ++i) {
+        char t[4]; int n = 0;
+        int x = p[i];
+        if (!x) t[n++] = '0';
+        while (x) { t[n++] = (char)('0' + x % 10); x /= 10; }
+        while (n) out[o++] = t[--n];
+        if (i < 3) out[o++] = '.';
+    }
+    out[o] = 0;
+}
+
+void net_info_text(char *out, int cap)
+{
+    int o = 0;
+    char b[24];
+    const char *drv = net_drv_name;
+    for (const char *p = drv; *p && o < cap - 8; ++p) out[o++] = *p;
+    out[o] = 0;
+    o += 0;
+    if (net_ip) { ip_str(net_ip, b); } else { b[0] = '0'; b[1] = 0; }
+    const char *lbl = "  ip=";
+    for (const char *p = lbl; *p && o < cap - 2; ++p) out[o++] = *p;
+    for (const char *p = b; *p && o < cap - 2; ++p) out[o++] = *p;
+    if (net_gw) { ip_str(net_gw, b); } else { b[0] = '0'; b[1] = 0; }
+    lbl = "  gw=";
+    for (const char *p = lbl; *p && o < cap - 2; ++p) out[o++] = *p;
+    for (const char *p = b; *p && o < cap - 2; ++p) out[o++] = *p;
+    lbl = net_dhcp_ok ? "  dhcp=ok" : "  dhcp=no";
+    for (const char *p = lbl; *p && o < cap - 2; ++p) out[o++] = *p;
+    lbl = net_arp_ok ? "  arp=ok" : "  arp=no";
+    for (const char *p = lbl; *p && o < cap - 2; ++p) out[o++] = *p;
+    lbl = net_link_up() ? "  link=up" : "  link=down";
+    for (const char *p = lbl; *p && o < cap - 2; ++p) out[o++] = *p;
+    out[o] = 0;
+}
+
+void net_stat_text(char *out, int cap)
+{
+    char b[20]; int o = 0;
+    const char *k = "rx=";
+    for (const char *p = k; *p; ++p) out[o++] = *p;
+    UINT32 v = net_rx_packets; int n = 0; char t[12];
+    if (!v) t[n++] = '0';
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) out[o++] = t[--n];
+    k = "  tx=";
+    for (const char *p = k; *p; ++p) out[o++] = *p;
+    v = net_tx_packets; n = 0;
+    if (!v) t[n++] = '0';
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) out[o++] = t[--n];
+    out[o] = 0;
+    (void)b; (void)cap;
+}
+
+/* 只对网关做 ping：目标 MAC 来自 ARP 应答；返回成功次数，rtt 取 TSC 周期最小值 */
+int net_ping_gw(UINT64 *min_cycles)
+{
+    if (!net_gw || !net_arp_ok) return -1;
+    UINT8 f[98];
+    for (int i = 0; i < 98; ++i) f[i] = 0;
+    for (int i = 0; i < 6; ++i) f[i] = net_gw_mac[i];
+    for (int i = 0; i < 6; ++i) f[6 + i] = net_mac[i];
+    f[12] = 0x08; f[13] = 0x00;
+    UINT8 *ip = f + 14;
+    ip[0] = 0x45; ip[8] = 64; ip[9] = 1;
+    *(UINT16 *)(ip + 2) = 20 + 8 + 40;
+    ip[12] = (UINT8)(net_ip & 0xFF); ip[13] = (UINT8)((net_ip >> 8) & 0xFF);
+    ip[14] = (UINT8)((net_ip >> 16) & 0xFF); ip[15] = (UINT8)((net_ip >> 24) & 0xFF);
+    ip[16] = (UINT8)(net_gw & 0xFF); ip[17] = (UINT8)((net_gw >> 8) & 0xFF);
+    ip[18] = (UINT8)((net_gw >> 16) & 0xFF); ip[19] = (UINT8)((net_gw >> 24) & 0xFF);
+    UINT8 *ic = ip + 20;
+    ic[0] = 8; ic[1] = 0; ic[4] = 0x57; ic[5] = 0x43; ic[6] = 0x54; ic[7] = 0x45;
+    UINT8 rx[NET_BUF]; UINT16 len = 0;
+    int ok = 0; UINT64 best = ~0ULL;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        UINT32 lo, hi;
+        __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+        UINT64 t0 = ((UINT64)hi << 32) | lo;
+        net_send(f, 98);
+        for (int t = 0; t < 300; ++t) {
+            if (net_poll(rx, &len) && len >= 42 &&
+                rx[12] == 0x08 && rx[13] == 0x00 && rx[23] == 1 && rx[34] == 0) {
+                __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+                UINT64 dt = (((UINT64)hi << 32) | lo) - t0;
+                if (dt < best) best = dt;
+                ++ok;
+                break;
+            }
+            ST->BootServices->Stall(3000);
+        }
+    }
+    if (min_cycles) *min_cycles = ok ? best : 0;
+    return ok;
+}

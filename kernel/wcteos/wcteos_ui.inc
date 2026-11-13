@@ -21,6 +21,7 @@ static CHAR16 *about_net_line(void)
 static int ui_tz_off = 0;
 static int ui_task_sel = -1;
 static int ui_ctx;                  /* 任务栏右键菜单 */
+static int ui_desk_ctx, ui_desk_x, ui_desk_y;   /* 桌面右键菜单 */
 static int ui_wp = 0;   /* 0 纯色 1 渐变 2 网格 3 动态 .glf 4 纸纹 5 星夜 */
 static int ui_demo_stage = -1;   /* >=0 表示处于演示序列 */              /* 0 纯色 1 渐变 2 网格 3 动态 .glf */
 static char ui_input[96];
@@ -226,7 +227,7 @@ static void ui_execute(void)
     if (scmp(t, "taskmgr") == 0 || scmp(t, "tisal") == 0) { ui_run = 0; ui_task = 1; return; }
     if (scmp(t, "cfg") == 0) { ui_run = 0; ui_set = 1; return; }
 
-    if (ui_ends(t, ".wct")) {
+    if (ui_ends(t, ".wct") || ui_ends(t, ".cok") || ui_ends(t, ".wxtk")) {
         ui_run = 0; ui_len = 0; ui_input[0] = 0;
         CHAR16 path[160];
         if (t[0] == '\\') ui_to_wide(t, path, 160);
@@ -299,10 +300,56 @@ static void ui_draw_set(void)
 
     gfx_text_w(x + 16, y + 222, L"系统信息", gfx_dim);
     gfx_text_w(x + 16, y + 242, L"wcteos 0.9-测试  |  WCT 原生内核（不依赖 Linux）  |  x86_64 UEFI", gfx_text_c);
-    gfx_text(x + 16, y + 264, about_net_line(), gfx_dim);
+    gfx_text_w(x + 16, y + 264, about_net_line(), gfx_dim);
     gfx_text(x + 16, y + 284, audio_status_line(), gfx_dim);
 
     ui_btn_w(x + w - 108, y + h - 40, 84, 26, L"关闭", 0);
+}
+
+
+/* ---------- 桌面右键菜单：刷新 / 新建文件夹 / 新建文本文档 ---------- */
+#define UI_DESK_ITEMS 3
+static void ui_desk_menu_open(int x, int y)
+{
+    int w = 190, h = 30 + UI_DESK_ITEMS * 26;
+    if (x + w > (int)gfx_w) x = (int)gfx_w - w;
+    if (y + h > (int)gfx_h - 34) y = (int)gfx_h - 34 - h;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    ui_desk_ctx = 1; ui_desk_x = x; ui_desk_y = y;
+}
+
+static void ui_desk_draw_menu(void)
+{
+    if (!ui_desk_ctx) return;
+    int x = ui_desk_x, y = ui_desk_y, w = 190, h = 30 + UI_DESK_ITEMS * 26;
+    gfx_fill(x, y, w, h, gfx_panel);
+    gfx_border(x, y, w, h, gfx_accent);
+    gfx_fill(x + 1, y + 1, w - 2, 24, gfx_top);
+    gfx_text_w(x + 8, y + 6, L"桌面", gfx_accent);
+    const CHAR16 *it[UI_DESK_ITEMS] = { L"刷新桌面", L"新建文件夹", L"新建文本文档" };
+    for (int i = 0; i < UI_DESK_ITEMS; ++i) {
+        int iy = y + 28 + i * 26;
+        if (ui_hit(x + 2, iy, w - 4, 24)) gfx_fill(x + 2, iy, w - 4, 24, gfx_top);
+        gfx_text_w(x + 10, iy + 4, it[i], gfx_text_c);
+    }
+}
+
+static int ui_desk_menu_click(void)
+{
+    if (!ui_desk_ctx) return 0;
+    int x = ui_desk_x, y = ui_desk_y, w = 190;
+    for (int i = 0; i < UI_DESK_ITEMS; ++i) {
+        int iy = y + 28 + i * 26;
+        if (ui_hit(x + 2, iy, w - 4, 24)) {
+            ui_desk_ctx = 0;
+            if (i == 0) { draw_desktop(); gfx_present(); }
+            else if (i == 1) file_make(L"新建文件夹", L"", 1);
+            else file_make(L"新建文本", L".txt", 0);
+            return 1;
+        }
+    }
+    if (!ui_hit(x, y, w, 30 + UI_DESK_ITEMS * 26)) ui_desk_ctx = 0;
+    return 1;
 }
 
 /* ---------- 任务管理器 ---------- */
@@ -422,7 +469,7 @@ static void ui_draw_about(void)
 
     gfx_text_w(x + 20, y + 156, L"编译：2026-11-10  |  api: 1", gfx_dim);
     gfx_text_w(x + 20, y + 176, L"安装时间：见 \\wct\\install.txt", gfx_dim);
-    gfx_text(x + 20, y + 196, about_net_line(), gfx_dim);
+    gfx_text_w(x + 20, y + 196, about_net_line(), gfx_dim);
     gfx_text(x + 20, y + 212, audio_status_line(), gfx_dim);
 
     ui_btn_w(x + w - 108, y + h - 44, 84, 26, L"关闭", 0);
@@ -632,6 +679,7 @@ static int ui_tray_click(void)
 static void wct_ui_draw(void)
 {
     if (ui_lock) { ui_draw_lock(); return; }
+    if (ui_desk_ctx) ui_desk_draw_menu();
     if (ui_menu) ui_draw_menu();
     if (ui_set) ui_draw_set();
     if (ui_task) ui_draw_task();
@@ -644,6 +692,7 @@ static void wct_ui_draw(void)
 /* ---------- 点击 ---------- */
 static int wct_ui_click(void)
 {
+    if (ui_desk_menu_click()) return 1;
     if (ui_lock) { ui_lock = 0; return 1; }
 
     if (ui_run) {
@@ -660,9 +709,9 @@ static int wct_ui_click(void)
     if (ui_set) {
         int x, y, w, h;
         ui_set_box(&x, &y, &w, &h);
-        for (int i = 0; i < 5; ++i)
-            if (ui_hit(x + 16 + i * 104, y + 60, 96, 26)) {
-                theme_index = (i == 4) ? 4 : i;
+        for (int i = 0; i < 6; ++i)          /* 与 draw 端完全一致：x+16+i*88，宽 80 */
+            if (ui_hit(x + 16 + i * 88, y + 60, 80, 26)) {
+                theme_index = i;
                 apply_theme();
                 return 1;
             }

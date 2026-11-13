@@ -315,7 +315,7 @@ void disk_probe(void)
                 ata_puts(" MB)\r\n");
 
                 PART_INFO parts[16];
-                int np = disk_parse_partitions(&d, parts, 16);
+                int np = 0;   /* Pro: 启动阶段不读分区表，避免 PIO 抢占固件磁盘通道 */
                 ata_puts("       table: ");
                 const char *tbl = "none";
                 if (np > 1) tbl = parts[0].gpt ? "GPT" : "MBR";

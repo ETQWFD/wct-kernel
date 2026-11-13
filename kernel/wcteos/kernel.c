@@ -1,5 +1,12 @@
 #include "efi.h"
 
+/* 跨编译单元前向声明：net.c / wctmod.c 在文件末尾才 include，
+   提前声明确保调用点类型正确，避免隐式声明导致的类型冲突 */
+void net_info_text(char *out, int cap);
+void net_stat_text(char *out, int cap);
+int net_ping_gw(UINT64 *min_cycles);
+int wct_run_file(EFI_FILE_PROTOCOL *root, const CHAR16 *path);
+
 static EFI_SYSTEM_TABLE *ST;
 #define BS (ST->BootServices)   /* 驱动模块统一使用 BS 别名 */
 static EFI_HANDLE g_image;
@@ -214,6 +221,8 @@ static EFI_GUID simple_fs_guid =
     { 0x964E5B22, 0x6459, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
 static EFI_GUID device_path_guid =
     { 0x09576E91, 0x6D3F, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
+static EFI_GUID file_info_guid =
+    { 0x09576E92, 0x6D3F, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
 static EFI_GUID fs_info_guid =
     { 0x09576E93, 0x6D3F, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
 static EFI_GUID gop_guid =
@@ -482,7 +491,7 @@ static int boot_menu(void)
     outc(0x0B, L"        wcteos LTS 1.0  /  Boot Manager");
     outln(L"");
     outln(L"  1. wcteos LTS 1.0        Full (Linux + Native)");
-    outln(L"  2. wcteos Native Only    Native only (No Linux)");
+    outln(L"  2. wcteos Pro            Native only (No Linux)");
     outln(L"");
     outc(0x0A, L"  Press 1 or 2, Enter for default (1)...");
     outln(L"");
@@ -910,8 +919,11 @@ static void scan_volumes(void)
         if (EFI_IS_ERROR(ST->BootServices->HandleProtocol(handles[i], &simple_fs_guid, (VOID **)&fs)) || !fs)
             continue;
         EFI_FILE_PROTOCOL *root = NULL;
-        if (EFI_IS_ERROR(fs->OpenVolume(fs, &root)) || !root)
+        if (g_loaded && handles[i] == g_loaded->DeviceHandle && ROOT) {
+            root = ROOT;                       /* 启动卷复用已打开根句柄，避免二次 OpenVolume */
+        } else if (EFI_IS_ERROR(fs->OpenVolume(fs, &root)) || !root) {
             continue;
+        }
 
         int idx = vol_count++;
         vol_roots[idx] = root;
@@ -1607,6 +1619,75 @@ static void cmd_rm(CHAR16 *args)
     }
 }
 
+
+static void cmd_attrib(CHAR16 *args)
+{
+    if (!args[0]) { outln(L"attrib: usage: attrib FILE"); return; }
+    CHAR16 path[256];
+    path_for(path, sizeof(path) / sizeof(path[0]), args);
+    EFI_FILE_PROTOCOL *f = NULL;
+    if (!open_path(path, &f, EFI_FILE_MODE_READ, 0)) { outln(L"attrib: not found"); return; }
+    static UINT8 info_buf[1024];
+    UINTN sz = sizeof(info_buf);
+    if (EFI_IS_ERROR(f->GetInfo(f, &file_info_guid, &sz, info_buf))) { f->Close(f); outln(L"attrib: no info"); return; }
+    EFI_FILE_INFO *fi = (EFI_FILE_INFO *)info_buf;
+    out(L"  名称："); outln(fi->FileName);
+    out(L"  大小："); out_int(fi->FileSize); outln(L" 字节");
+    out(L"  属性：");
+    if (fi->Attribute & EFI_FILE_DIRECTORY) out(L"目录 ");
+    else out(L"文件 ");
+    if (fi->Attribute & 0x1) out(L"只读 ");
+    if (fi->Attribute & 0x2) out(L"隐藏 ");
+    if (fi->Attribute & 0x4) out(L"系统 ");
+    outln(L"");
+    CHAR16 db[64];
+    ST->BootServices->Stall(0);
+    db[0] = 0;
+    outln(L"  修改时间：见 date 命令（固件时钟）");
+    f->Close(f);
+}
+
+static void cmd_netinfo(void)
+{
+    char b[96];
+    net_info_text(b, sizeof(b));
+    outln_cstr(b);
+    net_stat_text(b, sizeof(b));
+    outln_cstr(b);
+    outln(L"  以上 arp=ok 时才能 ping 网关");
+}
+
+static void cmd_ping(CHAR16 *args)
+{
+    if (args[0]) outln(L"ping: 当前只支持 ping 网关（无 DNS/路由表）");
+    UINT64 cyc = 0;
+    int ok = net_ping_gw(&cyc);
+    if (ok < 0) { outln(L"ping: 网络未就绪或没有网关"); return; }
+    if (!ok) { outln(L"ping: 4 次请求无应答"); return; }
+    out(L"  网关应答 "); out_int((UINT64)ok); outln(L"/4 次");
+    out(L"  最小往返（TSC 周期）："); out_int(cyc); outln(L"");
+    outln(L"  注：TCG 下周期数随宿主调度波动，不代表网络时延");
+}
+
+static void cmd_ren(CHAR16 *args)
+{
+    CHAR16 *a, *b;
+    split_first(args, &a, &b);
+    if (!a[0] || !b[0]) { outln(L"ren: usage: ren OLD NEW（可只改后缀）"); return; }
+    CHAR16 src[256], dst[256];
+    path_for(src, sizeof(src) / sizeof(src[0]), a);
+    path_for(dst, sizeof(dst) / sizeof(dst[0]), b);
+    static UINT8 buf[65536];
+    UINTN n = read_whole_file(src, buf, sizeof(buf));
+    if (!n) { outln(L"ren: source not found or empty"); return; }
+    if (!write_bytes(dst, buf, n)) { outln(L"ren: cannot write target"); return; }
+    EFI_FILE_PROTOCOL *f = NULL;
+    if (!open_path(src, &f, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) { outln(L"ren: cannot delete source"); return; }
+    EFI_STATUS st = f->Delete(f);
+    if (EFI_IS_ERROR(st)) { outln(L"ren: renamed but source still present"); return; }
+    out(L"renamed -> "); outln(dst);
+}
+
 static void cmd_cp(CHAR16 *args)
 {
     CHAR16 *src_arg, *dst_arg;
@@ -1727,7 +1808,7 @@ static void cmd_linux(void)
 
 static void cmd_native(void)
 {
-    outln(L"wcteos Native is the primary boot environment.");
+    outln(L"wcteos Pro is the primary boot environment.");
 }
 
 typedef struct {
@@ -1827,7 +1908,7 @@ static int list_package_commands(void)
 
 static void cmd_help(void)
 {
-    outc(theme()->accent, L"wcteos Native");
+    outc(theme()->accent, L"wcteos Pro");
     outln(L"  commands");
     outln(L"  ----------------------------------------------------------");
     outc(theme()->prompt, L"  help");
@@ -1909,7 +1990,7 @@ static void cmd_help(void)
 
 static void cmd_ver(void)
 {
-    outln(L"wcteos Native Shell 1.0");
+    outln(L"wcteos Pro Shell 1.0");
     outln(L"Freestanding C  /  x86_64 UEFI  /  FAT32 shared volume");
     outln(L"Compatibility subsystem: wcteos Linux (CPython 3.11.2)");
 }
@@ -2356,10 +2437,44 @@ static void run_script(const CHAR16 *path)
     --script_depth;
 }
 
+/* 可执行扩展名：.wct / .cok / .wxtk —— 同一 WCT1 容器，仅属性不同 */
+static int is_exec_file(const CHAR16 *name)
+{
+    int n = 0; while (name[n]) ++n;
+    if (n < 4 || name[n-4] != L'.') return 0;
+    CHAR16 e[5];
+    for (int i = 0; i < 4; ++i) {
+        CHAR16 c = name[n-4+i];
+        if (c >= L'A' && c <= L'Z') c = (CHAR16)(c + 32);
+        e[i] = c;
+    }
+    e[4] = 0;
+    if (weq(e, L".wct")) return 1;
+    if (weq(e, L".cok")) return 1;
+    if (n >= 5 && name[n-5] == L'.') {
+        CHAR16 x[6];
+        for (int i = 0; i < 5; ++i) {
+            CHAR16 c = name[n-5+i];
+            if (c >= L'A' && c <= L'Z') c = (CHAR16)(c + 32);
+            x[i] = c;
+        }
+        x[5] = 0;
+        if (weq(x, L".wxtk")) return 1;
+    }
+    return 0;
+}
+
 static void cmd_run(CHAR16 *args)
 {
     if (!args[0]) {
         outln(L"run: usage: run FILE.wct");
+        return;
+    }
+    int n = 0; while (args[n]) ++n;
+    if (is_exec_file(args)) {
+        CHAR16 path[256];
+        path_for(path, sizeof(path) / sizeof(path[0]), args);
+        wct_run_file(BOOT_ROOT ? BOOT_ROOT : ROOT, path);
         return;
     }
     run_script(args);
@@ -2999,6 +3114,8 @@ static void cmd_api(CHAR16 *args)
 
 /* ---- wcteos 桌面外壳：开始菜单 / 运行框 / 设置 / 任务管理器 / 关于 / 锁屏 ---- */
 #include "wcteos_ui.inc"
+#include "oobe.inc"
+#include "installer.inc"
 
 static void print_banner(void)
 {
@@ -3007,7 +3124,7 @@ static void print_banner(void)
 
     draw_wct_logo();
     outln(L"");
-    outc(0x0B, L"   wcteos Native 1.0  /  C / x86_64 UEFI / FAT32");
+    outc(0x0B, L"   wcteos Pro 1.0  /  C / x86_64 UEFI / FAT32");
     outln(L"");
     outln(linux_available ? L"   Self-developed native shell / Linux subsystem" : L"   Self-contained native-only build");
     outln(L"");
@@ -3139,7 +3256,15 @@ static void process_command(CHAR16 *line)
     else if (weq(command, L"ls")) cmd_ls(args);
     else if (weq(command, L"cat")) cmd_cat(args);
     else if (weq(command, L"write")) cmd_write(args);
-    else if (weq(command, L"rm")) cmd_rm(args);
+    else if (weq(command, L"rm") || weq(command, L"del")) cmd_rm(args);
+    else if (weq(command, L"attrib")) cmd_attrib(args);
+    else if (weq(command, L"ipconfig") || weq(command, L"netstat")) cmd_netinfo();
+    else if (weq(command, L"ping")) cmd_ping(args);
+    else if (weq(command, L"route")) { char b[96]; net_info_text(b, sizeof(b)); outln_cstr(b); }
+    else if (weq(command, L"type")) cmd_cat(args);
+    else if (weq(command, L"md")) cmd_mkdir(args);
+    else if (weq(command, L"rd")) cmd_rm(args);
+    else if (weq(command, L"ren") || weq(command, L"rename")) cmd_ren(args);
     else if (weq(command, L"cp")) cmd_cp(args);
     else if (weq(command, L"mkdir")) cmd_mkdir(args);
     else if (weq(command, L"cd")) cmd_cd(args);
@@ -3165,6 +3290,8 @@ static void process_command(CHAR16 *line)
     else if (weq(command, L"about")) cmd_about();
     else if (weq(command, L"color")) cmd_color(args);
     else if (weq(command, L"tty")) cmd_tty();
+    else if (weq(command, L"install")) cmd_install(args);
+    else if (weq(command, L"installfmt")) cmd_instfmt();
     else if (weq(command, L"gui")) cmd_gui();
     else if (weq(command, L"exitgui")) cmd_exitgui();
     else if (weq(command, L"clear")) cmd_clear();
@@ -3254,12 +3381,72 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     /* 内建基准：TSC 校准 + 内存吞吐（结果可写进性能报告） */
     bench_report();
 
+    /* 无人值守/安装介质：\wct\autorun.early 在进入桌面与 OOBE 之前逐行执行 */
+    {
+        static UINT8 ebuf[512];
+        UINTN en = read_whole_file(L"\\wct\\au_early", ebuf, sizeof(ebuf) - 1);
+        if (en) {
+            ebuf[en] = 0;
+            UINTN i = 0;
+            while (i < en) {
+                CHAR16 cmd[128]; int ci = 0;
+                while (i < en && (ebuf[i] == '\r' || ebuf[i] == '\n')) ++i;
+                while (i < en && ebuf[i] != '\r' && ebuf[i] != '\n' && ci < 127) cmd[ci++] = (CHAR16)ebuf[i++];
+                cmd[ci] = 0;
+                if (ci) process_command(cmd);
+                while (i < en && (ebuf[i] == '\r' || ebuf[i] == '\n')) ++i;
+            }
+        }
+    }
+
+    /* 安装介质：\wct\instmode 存在时先给安装/维护选择，避免误写数据盘 */
+    {
+        EFI_FILE_PROTOCOL *im = NULL;
+        if (open_path(L"\\wct\\instmode", &im, EFI_FILE_MODE_READ, 0)) {
+            im->Close(im);
+            installer_menu();
+        }
+    }
+
     /* 演示/直启：存在 \wct\autogui 时直接进入桌面 */
     {
         EFI_FILE_PROTOCOL *auto_gui = NULL;
         if (open_path(L"\\wct\\autogui", &auto_gui, EFI_FILE_MODE_READ, 0)) {
             auto_gui->Close(auto_gui);
             cmd_gui();
+        }
+    }
+
+    /* 首次开机：没有 \wct\oobe.cfg 时先走设置向导，完成后进桌面。
+       注意：在此之前不能对启动磁盘做 PIO 读（会破坏固件 FAT 句柄）。 */
+    {
+        EFI_FILE_PROTOCOL *oc = NULL;
+        if (!open_path(L"\\wct\\oobe.cfg", &oc, EFI_FILE_MODE_READ, 0)) {
+            if (oobe_run()) {
+                ST->ConOut->ClearScreen(ST->ConOut);
+                cmd_gui();
+            }
+        } else {
+            oc->Close(oc);
+            cmd_gui();      /* 已完成 OOBE：默认直接进桌面 */
+        }
+    }
+
+    /* 自动执行：\wct\autorun 每行一条命令，用于无人值守测试 */
+    {
+        static UINT8 abuf[512];
+        UINTN an = read_whole_file(L"\\wct\\autorun", abuf, sizeof(abuf) - 1);
+        if (an) {
+            abuf[an] = 0;
+            UINTN i = 0;
+            while (i < an) {
+                CHAR16 cmd[128]; int ci = 0;
+                while (i < an && (abuf[i] == '\r' || abuf[i] == '\n')) ++i;
+                while (i < an && abuf[i] != '\r' && abuf[i] != '\n' && ci < 127) cmd[ci++] = (CHAR16)abuf[i++];
+                cmd[ci] = 0;
+                if (ci) process_command(cmd);
+                while (i < an && (abuf[i] == '\r' || abuf[i] == '\n')) ++i;
+            }
         }
     }
 
